@@ -78,6 +78,22 @@ struct LoginDetails {
     username: String,
     password: String,
     website: String,
+    #[serde(default)]
+    websites: Vec<String>,
+    notes: String,
+    tags: Vec<String>,
+    #[serde(default)]
+    favorite: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PasswordDetails {
+    id: String,
+    item_type: String,
+    title: String,
+    password: String,
     notes: String,
     tags: Vec<String>,
     #[serde(default)]
@@ -92,6 +108,16 @@ struct LoginInput {
     username: String,
     password: String,
     website: String,
+    #[serde(default)]
+    websites: Vec<String>,
+    notes: String,
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PasswordInput {
+    title: String,
+    password: String,
     notes: String,
     tags: Vec<String>,
 }
@@ -238,6 +264,50 @@ fn current_root_key(state: &tauri::State<AppState>) -> Result<[u8; 32], String> 
         .ok_or_else(|| "Vault is locked".to_string())
 }
 
+fn title_or_default(title: &str, fallback: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn icon_text(title: &str) -> String {
+    title.chars().take(2).collect::<String>()
+}
+
+fn normalize_websites(primary: String, websites: Vec<String>) -> Vec<String> {
+    let mut values = if websites.is_empty() { vec![primary] } else { websites };
+    if values.is_empty() {
+        values.push(String::new());
+    }
+    values
+}
+
+fn primary_website(websites: &[String]) -> String {
+    websites
+        .iter()
+        .find(|website| !website.trim().is_empty())
+        .or_else(|| websites.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn details_value_with_favorite(
+    root_key: &[u8; 32],
+    id: &str,
+    encrypted_details: &[u8],
+    favorite: bool,
+) -> Result<serde_json::Value, String> {
+    let aad = format!("item-details:{id}");
+    let mut details: serde_json::Value = decrypt_json(root_key, aad.as_bytes(), encrypted_details)?;
+    if let Some(object) = details.as_object_mut() {
+        object.insert("favorite".to_string(), serde_json::Value::Bool(favorite));
+    }
+    Ok(details)
+}
+
 #[tauri::command]
 fn get_status(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
     if state.session.lock().map_err(|_| "Session lock poisoned".to_string())?.is_some() {
@@ -361,7 +431,7 @@ fn list_items(state: tauri::State<AppState>) -> Result<Vec<ItemOverview>, String
 }
 
 #[tauri::command]
-fn get_item(id: String, state: tauri::State<AppState>) -> Result<LoginDetails, String> {
+fn get_item(id: String, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
     let (encrypted_details, favorite): (Vec<u8>, i64) = conn
@@ -371,10 +441,7 @@ fn get_item(id: String, state: tauri::State<AppState>) -> Result<LoginDetails, S
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| "Item not found".to_string())?;
-    let aad = format!("item-details:{id}");
-    let mut details: LoginDetails = decrypt_json(&root_key, aad.as_bytes(), &encrypted_details)?;
-    details.favorite = favorite != 0;
-    Ok(details)
+    details_value_with_favorite(&root_key, &id, &encrypted_details, favorite != 0)
 }
 
 #[tauri::command]
@@ -383,19 +450,18 @@ fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<Logi
     let conn = open_db()?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let title = if input.title.trim().is_empty() {
-        "未命名登录信息".to_string()
-    } else {
-        input.title.trim().to_string()
-    };
-    let icon_text = title.chars().take(2).collect::<String>();
+    let title = title_or_default(&input.title, "未命名登录信息");
+    let icon_text = icon_text(&title);
+    let websites = normalize_websites(input.website, input.websites);
+    let website = primary_website(&websites);
     let details = LoginDetails {
         id: id.clone(),
         item_type: "login".to_string(),
         title: title.clone(),
         username: input.username,
         password: input.password,
-        website: input.website,
+        website,
+        websites,
         notes: input.notes,
         tags: input.tags,
         favorite: false,
@@ -428,7 +494,51 @@ fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<Logi
 }
 
 #[tauri::command]
-fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) -> Result<LoginDetails, String> {
+fn create_password(input: PasswordInput, state: tauri::State<AppState>) -> Result<PasswordDetails, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let title = title_or_default(&input.title, "未命名密码");
+    let icon_text = icon_text(&title);
+    let details = PasswordDetails {
+        id: id.clone(),
+        item_type: "password".to_string(),
+        title: title.clone(),
+        password: input.password,
+        notes: input.notes,
+        tags: input.tags,
+        favorite: false,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let overview = ItemOverview {
+        id: id.clone(),
+        item_type: "password".to_string(),
+        title,
+        subtitle: "密码".to_string(),
+        website: None,
+        icon_text,
+        favorite: false,
+        updated_at: now.clone(),
+    };
+
+    let overview_aad = format!("item-overview:{id}");
+    let details_aad = format!("item-details:{id}");
+    let encrypted_overview = encrypt_json(&root_key, overview_aad.as_bytes(), &overview)?;
+    let encrypted_details = encrypt_json(&root_key, details_aad.as_bytes(), &details)?;
+
+    conn.execute(
+        "INSERT INTO items (id, item_type, encrypted_overview, encrypted_details, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, "password", encrypted_overview, encrypted_details, now, now],
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(details)
+}
+
+#[tauri::command]
+fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
     let changed = conn
@@ -444,10 +554,7 @@ fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) 
     let encrypted_details: Vec<u8> = conn
         .query_row("SELECT encrypted_details FROM items WHERE id = ?1", params![id.clone()], |row| row.get(0))
         .map_err(|_| "Item not found".to_string())?;
-    let aad = format!("item-details:{id}");
-    let mut details: LoginDetails = decrypt_json(&root_key, aad.as_bytes(), &encrypted_details)?;
-    details.favorite = favorite;
-    Ok(details)
+    details_value_with_favorite(&root_key, &id, &encrypted_details, favorite)
 }
 
 #[tauri::command]
@@ -491,6 +598,7 @@ fn main() {
             list_items,
             get_item,
             create_login,
+            create_password,
             set_item_favorite,
             generate_password
         ])

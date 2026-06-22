@@ -22,6 +22,7 @@ import {
   Landmark,
   ListFilter,
   Lock,
+  LockKeyhole,
   LogOut,
   Mail,
   MinusCircle,
@@ -42,10 +43,15 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from 'react';
 import { api } from './api';
-import type { ItemOverview, ItemType, LoginInput, LoginItem, VaultStatus } from './types';
+import type { ItemOverview, ItemType, LoginInput, PasswordInput, VaultItem, VaultStatus } from './types';
 import { startWindowDrag } from './windowDrag';
 
 type Overlay =
@@ -55,9 +61,13 @@ type Overlay =
 type SidebarView = 'all' | 'favorites';
 type CategoryFilter = 'all' | ItemType;
 type ResizablePane = 'sidebar' | 'itemList';
+type FieldBorderStyle = 'top' | 'middle' | 'bottom' | 'single';
+type FieldTone = 'primary' | 'secondary';
+type PasswordGeneratorType = 'random' | 'memorable' | 'pin';
 
 const sidebarWidthLimits = { min: 230, max: 420, default: 276 };
 const itemListWidthLimits = { min: 300, max: 520, default: 354 };
+const passwordLengthLimits = { min: 8, max: 40, default: 8 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -66,7 +76,7 @@ const itemTypes: Array<{ type: ItemType; label: string; icon: JSX.Element; imple
   { type: 'secure_note', label: '安全备注', icon: <FileText />, implemented: false },
   { type: 'credit_card', label: '信用卡', icon: <CreditCard />, implemented: false },
   { type: 'identity', label: '身份标识', icon: <IdCard />, implemented: false },
-  { type: 'password', label: '密码', icon: <KeyRound />, implemented: false },
+  { type: 'password', label: '密码', icon: <KeyRound />, implemented: true },
   { type: 'document', label: '文档', icon: <FileText />, implemented: false },
 ];
 
@@ -95,20 +105,61 @@ const moreItemTypes: Array<{ label: string; icon: JSX.Element }> = [
   { label: '银行卡', icon: <Banknote /> },
 ];
 
+const passwordGeneratorTypes: Array<{ value: PasswordGeneratorType; label: string }> = [
+  { value: 'random', label: '随机密码' },
+  { value: 'memorable', label: '易记密码' },
+  { value: 'pin', label: 'PIN 码' },
+];
+
+const memorablePasswordWords = [
+  'river',
+  'mint',
+  'solar',
+  'paper',
+  'north',
+  'copper',
+  'forest',
+  'pixel',
+  'orbit',
+  'summer',
+  'quiet',
+  'stone',
+];
+
 const fallbackLogin: LoginInput = {
   title: '',
   username: 'vim27@qq.com',
   password: 'yUndKy6izwkvT26sRrib',
   website: 'https://example.com',
+  websites: ['https://example.com'],
   notes: '',
   tags: [],
+};
+
+const fallbackPassword: PasswordInput = {
+  title: '',
+  password: 'yUndKy6izwkvT26sRrib',
+  notes: '',
+  tags: [],
+};
+
+const websitesForLogin = (input: Pick<LoginInput, 'website' | 'websites'>) =>
+  input.websites.length > 0 ? input.websites : [input.website];
+
+const websitePatch = (websites: string[]): Pick<LoginInput, 'website' | 'websites'> => {
+  const nextWebsites = websites.length > 0 ? websites : [''];
+  const primaryWebsite = nextWebsites.find((website) => website.trim().length > 0) ?? nextWebsites[0] ?? '';
+  return {
+    website: primaryWebsite,
+    websites: nextWebsites,
+  };
 };
 
 export function App() {
   const [status, setStatus] = useState<VaultStatus>('locked');
   const [items, setItems] = useState<ItemOverview[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
-  const [selectedItem, setSelectedItem] = useState<LoginItem>();
+  const [selectedItem, setSelectedItem] = useState<VaultItem>();
   const [query, setQuery] = useState('');
   const [sidebarView, setSidebarView] = useState<SidebarView>('all');
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
@@ -302,9 +353,17 @@ export function App() {
 
       {overlay.kind === 'editor' && (
         <ItemEditorModal
+          itemType={overlay.itemType}
           onClose={() => setOverlay({ kind: 'none' })}
-          onSave={async (input) => {
+          onSaveLogin={async (input) => {
             const item = await api.createLogin(input);
+            await refreshItems();
+            setSelectedId(item.id);
+            setSelectedItem(item);
+            setOverlay({ kind: 'none' });
+          }}
+          onSavePassword={async (input) => {
+            const item = await api.createPassword(input);
             await refreshItems();
             setSelectedId(item.id);
             setSelectedItem(item);
@@ -681,6 +740,13 @@ function ItemListPane({
 function ItemIcon({ item }: { item: ItemOverview }) {
   const initials = item.icon_text.slice(0, 2);
   const isOpenAi = item.title.toLowerCase().includes('openai');
+  if (item.item_type === 'password') {
+    return (
+      <span className="item-icon item-icon-password">
+        <KeyRound size={22} />
+      </span>
+    );
+  }
   return <span className={`item-icon ${isOpenAi ? 'black' : ''}`}>{isOpenAi ? '◎' : initials}</span>;
 }
 
@@ -688,10 +754,11 @@ function DetailPane({
   item,
   onFavoriteChange,
 }: {
-  item?: LoginItem;
+  item?: VaultItem;
   onFavoriteChange: (id: string, favorite: boolean) => Promise<void>;
 }) {
   const [revealed, setRevealed] = useState(false);
+  const itemWebsites = item?.item_type === 'login' ? item.websites?.length ? item.websites : [item.website] : [];
 
   useEffect(() => {
     setRevealed(false);
@@ -741,34 +808,42 @@ function DetailPane({
       </div>
       <div className="detail-content">
         <div className="detail-title-row">
-          <span className="detail-icon">{item.title.slice(0, 2)}</span>
+          <span className={`detail-icon detail-icon-${item.item_type}`}>
+            {item.item_type === 'password' ? <KeyRound size={34} /> : item.title.slice(0, 2)}
+          </span>
           <h1>{item.title}</h1>
         </div>
-        <div className="credential-card">
-          <FieldLine label="用户名" value={item.username} actionLabel="复制" onAction={() => copyValue(item.username)} />
-          <div className="field-line">
-            <div>
-              <span className="field-label">密码</span>
-              <span className="field-value password-value">{revealed ? item.password : '••••••••••'}</span>
+        {item.item_type === 'login' ? (
+          <>
+            <div className="credential-card">
+              <FieldLine label="用户名" value={item.username} actionLabel="复制" onAction={() => copyValue(item.username)} />
+              <SecretFieldLine
+                password={item.password}
+                revealed={revealed}
+                onReveal={() => setRevealed((value) => !value)}
+                onCopy={() => copyValue(item.password)}
+              />
             </div>
-            <div className="field-actions">
-              <span className="strength">极佳</span>
-              <span className="strength-ring" />
-              <button className="icon-button" onClick={() => setRevealed((value) => !value)}>
-                {revealed ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
-              <button className="field-copy" onClick={() => copyValue(item.password)}>
-                复制
-              </button>
-            </div>
+            <section className="detail-section">
+              <span className="field-label">网站</span>
+              {itemWebsites.map((website, index) => (
+                <a key={`${index}-${website}`} href={website} target="_blank" rel="noreferrer">
+                  {website}
+                </a>
+              ))}
+            </section>
+          </>
+        ) : (
+          <div className="credential-card">
+            <SecretFieldLine
+              password={item.password}
+              revealed={revealed}
+              highlighted
+              onReveal={() => setRevealed((value) => !value)}
+              onCopy={() => copyValue(item.password)}
+            />
           </div>
-        </div>
-        <section className="detail-section">
-          <span className="field-label">网站</span>
-          <a href={item.website} target="_blank" rel="noreferrer">
-            {item.website}
-          </a>
-        </section>
+        )}
         {item.notes && (
           <section className="detail-section notes">
             {item.notes.split('\n').map((line) => (
@@ -794,6 +869,39 @@ function DetailPane({
         </button>
       </div>
     </section>
+  );
+}
+
+function SecretFieldLine({
+  password,
+  revealed,
+  highlighted,
+  onReveal,
+  onCopy,
+}: {
+  password: string;
+  revealed: boolean;
+  highlighted?: boolean;
+  onReveal: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <div className={`field-line ${highlighted ? 'highlighted' : ''}`}>
+      <div>
+        <span className="field-label">密码</span>
+        <span className="field-value password-value">{revealed ? password : '••••••••••'}</span>
+      </div>
+      <div className="field-actions">
+        <span className="strength">极佳</span>
+        <span className="strength-ring" />
+        <button className="icon-button" onClick={onReveal}>
+          {revealed ? <EyeOff size={18} /> : <Eye size={18} />}
+        </button>
+        <button className="field-copy" onClick={onCopy}>
+          复制
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -875,18 +983,36 @@ function TypePickerModal({ onClose, onPick }: { onClose: () => void; onPick: (it
   );
 }
 
-function ItemEditorModal({ onClose, onSave }: { onClose: () => void; onSave: (input: LoginInput) => Promise<void> }) {
-  const [input, setInput] = useState<LoginInput>(fallbackLogin);
+function ItemEditorModal({
+  itemType,
+  onClose,
+  onSaveLogin,
+  onSavePassword,
+}: {
+  itemType: ItemType;
+  onClose: () => void;
+  onSaveLogin: (input: LoginInput) => Promise<void>;
+  onSavePassword: (input: PasswordInput) => Promise<void>;
+}) {
+  const typeConfig = itemTypes.find((item) => item.type === itemType) ?? itemTypes[0];
+  const isPassword = itemType === 'password';
+  const [loginInput, setLoginInput] = useState<LoginInput>(fallbackLogin);
+  const [passwordInput, setPasswordInput] = useState<PasswordInput>(fallbackPassword);
   const [generatorHint, setGeneratorHint] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const update = (patch: Partial<LoginInput>) => setInput((current) => ({ ...current, ...patch }));
+  const updateLogin = (patch: Partial<LoginInput>) => setLoginInput((current) => ({ ...current, ...patch }));
+  const updatePassword = (patch: Partial<PasswordInput>) => setPasswordInput((current) => ({ ...current, ...patch }));
 
   const save = async () => {
     setSaving(true);
     try {
-      await onSave(input);
+      if (isPassword) {
+        await onSavePassword(passwordInput);
+      } else {
+        await onSaveLogin(loginInput);
+      }
     } finally {
       setSaving(false);
     }
@@ -894,97 +1020,44 @@ function ItemEditorModal({ onClose, onSave }: { onClose: () => void; onSave: (in
 
   return (
     <div className="overlay">
-      <div className="editor-modal modal-card">
+      <div className="editor-modal modal-card" role="dialog" aria-modal="true" aria-labelledby="new-item-title">
         <header className="editor-header">
-          <button className="icon-button" onClick={onClose}>
+          <button className="icon-button" aria-label="返回" onClick={onClose}>
             <ArrowLeft />
           </button>
-          <h2>新的项目</h2>
-          <button className="icon-button" onClick={onClose}>
+          <h2 id="new-item-title">新的项目</h2>
+          <button className="icon-button" aria-label="关闭" onClick={onClose}>
             <X />
           </button>
         </header>
-        <div className="editor-body">
-          <div className="editor-title-row">
-            <div className="large-item-icon">
-              <KeyRound size={34} />
-              <button>
-                <ChevronDown size={18} />
-              </button>
-            </div>
-            <input
-              className="title-input"
-              value={input.title}
-              placeholder="输入标题"
-              onChange={(event) => update({ title: event.target.value })}
+        <div className={`editor-body editor-details ${generatorOpen ? 'generator-open' : ''}`}>
+          <div className="editor-elements">
+            <EditorTitle
+              itemType={itemType}
+              icon={typeConfig.icon}
+              value={isPassword ? passwordInput.title : loginInput.title}
+              onChange={(title) => (isPassword ? updatePassword({ title }) : updateLogin({ title }))}
             />
-          </div>
-          <div className="edit-group">
-            <label className="edit-field">
-              <span>用户名</span>
-              <input value={input.username} onChange={(event) => update({ username: event.target.value })} />
-            </label>
-            <label className="edit-field password-edit-field">
-              <span>密码</span>
-              <input
-                value={input.password}
-                onFocus={() => setGeneratorHint(true)}
-                onChange={(event) => update({ password: event.target.value })}
+            {isPassword ? (
+              <PasswordEditorFields
+                input={passwordInput}
+                generatorHint={generatorHint}
+                generatorOpen={generatorOpen}
+                onGeneratorHintChange={setGeneratorHint}
+                onGeneratorOpenChange={setGeneratorOpen}
+                onChange={updatePassword}
               />
-              {generatorHint && !generatorOpen && (
-                <button type="button" className="generate-chip" onClick={() => setGeneratorOpen(true)}>
-                  <KeyRound size={18} />
-                  创建新密码
-                </button>
-              )}
-            </label>
+            ) : (
+              <LoginEditorFields
+                input={loginInput}
+                generatorHint={generatorHint}
+                generatorOpen={generatorOpen}
+                onGeneratorHintChange={setGeneratorHint}
+                onGeneratorOpenChange={setGeneratorOpen}
+                onChange={updateLogin}
+              />
+            )}
           </div>
-          <div className="field-block">
-            <button className="drag-handle">
-              <MoreVertical />
-            </button>
-            <label>
-              <span>网站</span>
-              <input value={input.website} onChange={(event) => update({ website: event.target.value })} />
-            </label>
-            <button className="icon-button">
-              <SlidersHorizontal />
-            </button>
-            <button className="danger-icon">
-              <MinusCircle />
-            </button>
-          </div>
-          <button className="add-row">
-            <Plus />
-            添加另一个网站
-          </button>
-          <button className="add-row">
-            <Plus />
-            添加更多
-            <ChevronDown />
-          </button>
-          <label className="notes-box">
-            <span>备注</span>
-            <textarea
-              value={input.notes}
-              placeholder="在这里添加关于此项目的备注。"
-              onChange={(event) => update({ notes: event.target.value })}
-            />
-          </label>
-          <button className="add-row">
-            <Plus />
-            添加位置
-          </button>
-          {generatorOpen && (
-            <PasswordGeneratorPopover
-              onCancel={() => setGeneratorOpen(false)}
-              onUse={(password) => {
-                update({ password });
-                setGeneratorHint(false);
-                setGeneratorOpen(false);
-              }}
-            />
-          )}
         </div>
         <footer className="editor-footer">
           <button className="primary-button save-button" disabled={saving} onClick={save}>
@@ -996,6 +1069,353 @@ function ItemEditorModal({ onClose, onSave }: { onClose: () => void; onSave: (in
   );
 }
 
+function EditorTitle({
+  itemType,
+  icon,
+  value,
+  onChange,
+}: {
+  itemType: ItemType;
+  icon: JSX.Element;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [customIconUrl, setCustomIconUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const editorIcon = itemType === 'login' ? <LockKeyhole /> : icon;
+
+  useEffect(() => {
+    return () => {
+      if (customIconUrl) {
+        URL.revokeObjectURL(customIconUrl);
+      }
+    };
+  }, [customIconUrl]);
+
+  return (
+    <div className="editor-title-row">
+      <div className="large-item-icon-wrap">
+        <button
+          type="button"
+          className={`large-item-icon large-item-icon-${itemType}`}
+          aria-label="选择新图标"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <span className="large-item-icon-glyph">
+            {customIconUrl ? <img className="large-item-custom-icon" src={customIconUrl} alt="" /> : editorIcon}
+          </span>
+        </button>
+        <input
+          ref={fileInputRef}
+          className="icon-file-input"
+          type="file"
+          accept="image/*"
+          tabIndex={-1}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (!file) {
+              return;
+            }
+            setCustomIconUrl(URL.createObjectURL(file));
+            event.currentTarget.value = '';
+          }}
+        />
+      </div>
+      <input
+        autoFocus
+        className="title-input"
+        value={value}
+        placeholder="输入标题"
+        data-title-field
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
+  );
+}
+
+function EditableFieldGroup({ children }: { children: ReactNode }) {
+  return <div className="edit-group editable-field-group">{children}</div>;
+}
+
+function EditableTextField({
+  label,
+  value,
+  borderStyle = 'single',
+  tone = 'primary',
+  actions,
+  inputClassName,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  borderStyle?: FieldBorderStyle;
+  tone?: FieldTone;
+  actions?: ReactNode;
+  inputClassName?: string;
+  onChange: (value: string) => void;
+}) {
+  const fieldId = useId();
+
+  return (
+    <div className={`editable-field ${tone} field-${borderStyle} ${actions ? 'with-actions' : ''}`}>
+      <div className="editable-field-content">
+        <label className="editable-field-label" htmlFor={fieldId}>
+          {label}
+        </label>
+        <div className="editable-field-value-container">
+          <input
+            id={fieldId}
+            className={`editable-field-value ${inputClassName ?? ''}`}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        </div>
+      </div>
+      {actions && <div className="editable-field-actions">{actions}</div>}
+    </div>
+  );
+}
+
+function LoginEditorFields({
+  input,
+  generatorHint,
+  generatorOpen,
+  onGeneratorHintChange,
+  onGeneratorOpenChange,
+  onChange,
+}: {
+  input: LoginInput;
+  generatorHint: boolean;
+  generatorOpen: boolean;
+  onGeneratorHintChange: (value: boolean) => void;
+  onGeneratorOpenChange: (value: boolean) => void;
+  onChange: (patch: Partial<LoginInput>) => void;
+}) {
+  return (
+    <>
+      <EditableFieldGroup>
+        <EditableTextField
+          label="用户名"
+          value={input.username}
+          borderStyle="top"
+          onChange={(username) => onChange({ username })}
+        />
+        <EditablePasswordField
+          value={input.password}
+          borderStyle="bottom"
+          generatorHint={generatorHint}
+          generatorOpen={generatorOpen}
+          onGeneratorHintChange={onGeneratorHintChange}
+          onGeneratorOpenChange={onGeneratorOpenChange}
+          onChange={(password) => onChange({ password })}
+        />
+      </EditableFieldGroup>
+      <WebsiteFields input={input} onChange={onChange} />
+      <EditorNotes value={input.notes} onChange={(notes) => onChange({ notes })} />
+    </>
+  );
+}
+
+function WebsiteFields({
+  input,
+  onChange,
+}: {
+  input: LoginInput;
+  onChange: (patch: Partial<LoginInput>) => void;
+}) {
+  const websites = websitesForLogin(input);
+  const updateWebsite = (index: number, website: string) => {
+    const nextWebsites = websites.map((currentWebsite, currentIndex) =>
+      currentIndex === index ? website : currentWebsite,
+    );
+    onChange(websitePatch(nextWebsites));
+  };
+  const addWebsite = () => {
+    onChange(websitePatch([...websites, 'https://example.com']));
+  };
+  const removeWebsite = (index: number) => {
+    if (websites.length === 1) {
+      onChange(websitePatch(['']));
+      return;
+    }
+    onChange(websitePatch(websites.filter((_, currentIndex) => currentIndex !== index)));
+  };
+
+  return (
+    <div className="website-field-group">
+      {websites.map((website, index) => (
+        <div className="optional-field-row" key={`${index}-${websites.length}`}>
+          <button type="button" className="drag-handle" aria-label="调整网站字段">
+            <MoreVertical />
+          </button>
+          <EditableTextField
+            label="网站"
+            value={website}
+            borderStyle={index === 0 ? 'top' : 'middle'}
+            tone="secondary"
+            onChange={(nextWebsite) => updateWebsite(index, nextWebsite)}
+            actions={
+              <>
+                <button type="button" className="icon-button" aria-label="网站字段选项">
+                  <SlidersHorizontal />
+                </button>
+                <button type="button" className="danger-icon" aria-label="移除网站字段" onClick={() => removeWebsite(index)}>
+                  <MinusCircle />
+                </button>
+              </>
+            }
+          />
+        </div>
+      ))}
+      <button type="button" className="add-row" onClick={addWebsite}>
+        <Plus />
+        添加另一个网站
+      </button>
+    </div>
+  );
+}
+
+function PasswordEditorFields({
+  input,
+  generatorHint,
+  generatorOpen,
+  onGeneratorHintChange,
+  onGeneratorOpenChange,
+  onChange,
+}: {
+  input: PasswordInput;
+  generatorHint: boolean;
+  generatorOpen: boolean;
+  onGeneratorHintChange: (value: boolean) => void;
+  onGeneratorOpenChange: (value: boolean) => void;
+  onChange: (patch: Partial<PasswordInput>) => void;
+}) {
+  return (
+    <>
+      <EditableFieldGroup>
+        <EditablePasswordField
+          value={input.password}
+          borderStyle="single"
+          generatorHint={generatorHint}
+          generatorOpen={generatorOpen}
+          onGeneratorHintChange={onGeneratorHintChange}
+          onGeneratorOpenChange={onGeneratorOpenChange}
+          onChange={(password) => onChange({ password })}
+        />
+      </EditableFieldGroup>
+      <EditorNotes value={input.notes} onChange={(notes) => onChange({ notes })} />
+    </>
+  );
+}
+
+function EditablePasswordField({
+  value,
+  borderStyle = 'single',
+  generatorHint,
+  generatorOpen,
+  onGeneratorHintChange,
+  onGeneratorOpenChange,
+  onChange,
+}: {
+  value: string;
+  borderStyle?: FieldBorderStyle;
+  generatorHint: boolean;
+  generatorOpen: boolean;
+  onGeneratorHintChange: (value: boolean) => void;
+  onGeneratorOpenChange: (value: boolean) => void;
+  onChange: (password: string) => void;
+}) {
+  const fieldId = useId();
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const showGeneratorHint = () => {
+    if (!generatorOpen) {
+      onGeneratorHintChange(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!generatorHint || generatorOpen) {
+      return undefined;
+    }
+
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (!fieldRef.current?.contains(event.target as Node)) {
+        onGeneratorHintChange(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnOutsidePointerDown);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
+  }, [generatorHint, generatorOpen, onGeneratorHintChange]);
+
+  return (
+    <>
+      {generatorOpen && (
+        <button
+          type="button"
+          className="password-generator-backdrop"
+          aria-label="关闭密码生成器"
+          onClick={() => onGeneratorOpenChange(false)}
+        />
+      )}
+      <div
+        ref={fieldRef}
+        className={`editable-field primary field-${borderStyle} password-edit-field ${generatorOpen ? 'generator-open' : ''}`}
+        onPointerDownCapture={showGeneratorHint}
+      >
+        <div className="editable-field-content">
+          <label className="editable-field-label" htmlFor={fieldId}>
+            密码
+          </label>
+          <div className="editable-field-value-container">
+            <input
+              id={fieldId}
+              className="editable-field-value"
+              value={value}
+              spellCheck={false}
+              onFocus={showGeneratorHint}
+              onClick={showGeneratorHint}
+              onChange={(event) => onChange(event.target.value)}
+            />
+          </div>
+        </div>
+        {generatorHint && !generatorOpen && (
+          <button type="button" className="generate-chip" onClick={() => onGeneratorOpenChange(true)}>
+            <KeyRound size={18} />
+            创建新密码
+          </button>
+        )}
+        {generatorOpen && (
+          <PasswordGeneratorPopover
+            onCancel={() => onGeneratorOpenChange(false)}
+            onUse={(password) => {
+              onChange(password);
+              onGeneratorHintChange(false);
+              onGeneratorOpenChange(false);
+            }}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function EditorNotes({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const fieldId = useId();
+
+  return (
+    <div className="notes-box editable-note-field">
+      <label htmlFor={fieldId}>备注</label>
+      <textarea
+        id={fieldId}
+        value={value}
+        placeholder="在这里添加关于此项目的备注。"
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
+  );
+}
+
 function PasswordGeneratorPopover({
   onCancel,
   onUse,
@@ -1003,57 +1423,184 @@ function PasswordGeneratorPopover({
   onCancel: () => void;
   onUse: (password: string) => void;
 }) {
-  const [length, setLength] = useState(20);
+  const [length, setLength] = useState(passwordLengthLimits.default);
+  const [generatorType, setGeneratorType] = useState<PasswordGeneratorType>('random');
+  const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const [includeNumbers, setIncludeNumbers] = useState(true);
   const [includeSymbols, setIncludeSymbols] = useState(false);
   const [password, setPassword] = useState('');
+  const passwordInputRef = useRef<HTMLInputElement>(null);
+  const typeMenuRef = useRef<HTMLDivElement>(null);
+  const selectedType = passwordGeneratorTypes.find((option) => option.value === generatorType) ?? passwordGeneratorTypes[0];
+  const lengthProgress =
+    ((length - passwordLengthLimits.min) / (passwordLengthLimits.max - passwordLengthLimits.min)) * 100;
+  const setClampedLength = (nextLength: number) =>
+    setLength(clamp(nextLength, passwordLengthLimits.min, passwordLengthLimits.max));
+
+  const generateLocalPassword = useCallback(() => {
+    const pick = <T,>(values: T[]) => {
+      const bytes = new Uint32Array(1);
+      crypto.getRandomValues(bytes);
+      return values[bytes[0] % values.length];
+    };
+
+    if (generatorType === 'pin') {
+      const digits = new Uint32Array(length);
+      crypto.getRandomValues(digits);
+      return Array.from(digits, (value) => String(value % 10)).join('');
+    }
+
+    const words: string[] = [];
+    while (words.join('-').length < length) {
+      words.push(pick(memorablePasswordWords));
+    }
+    return words.join('-').slice(0, length);
+  }, [generatorType, length]);
 
   const refresh = useCallback(async () => {
-    setPassword(
-      await api.generatePassword({
-        length,
-        include_numbers: includeNumbers,
-        include_symbols: includeSymbols,
-      }),
-    );
-  }, [includeNumbers, includeSymbols, length]);
+    if (generatorType === 'random') {
+      setPassword(
+        await api.generatePassword({
+          length,
+          include_numbers: includeNumbers,
+          include_symbols: includeSymbols,
+        }),
+      );
+      return;
+    }
+
+    setPassword(generateLocalPassword());
+  }, [generateLocalPassword, generatorType, includeNumbers, includeSymbols, length]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!typeMenuOpen) {
+      return undefined;
+    }
+
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (!typeMenuRef.current?.contains(event.target as Node)) {
+        setTypeMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnOutsidePointerDown);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
+  }, [typeMenuOpen]);
+
+  useEffect(() => {
+    if (!password) return;
+    passwordInputRef.current?.focus();
+    passwordInputRef.current?.select();
+  }, [password]);
+
   return (
     <div className="password-popover">
       <div className="generator-actions">
-        <button onClick={onCancel}>取消</button>
-        <button className="icon-button" onClick={refresh}>
-          <RefreshCw />
+        <button type="button" onClick={onCancel}>
+          取消
         </button>
-        <button className="primary-button" onClick={() => onUse(password)}>
+        <button type="button" className="icon-button" aria-label="重新生成密码" onClick={refresh}>
+          <RefreshCw size={22} />
+        </button>
+        <button type="button" className="primary-button" onClick={() => onUse(password)}>
           使用
         </button>
       </div>
-      <input className="generated-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      <input
+        ref={passwordInputRef}
+        className="generated-password"
+        aria-label="生成的密码"
+        spellCheck={false}
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+      />
       <div className="strength-bar" />
       <div className="generator-row">
         <span>类型</span>
-        <button className="select-button">
-          随机密码
-          <ChevronDown size={16} />
-        </button>
+        <div className="generator-type-control" ref={typeMenuRef}>
+          <button
+            type="button"
+            className="select-button"
+            aria-haspopup="menu"
+            aria-expanded={typeMenuOpen}
+            onClick={() => setTypeMenuOpen((open) => !open)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setTypeMenuOpen(false);
+              }
+            }}
+          >
+            {selectedType.label}
+            <ChevronDown size={16} />
+          </button>
+          {typeMenuOpen && (
+            <div className="generator-type-menu" role="menu">
+              {passwordGeneratorTypes.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={option.value === generatorType}
+                  className={option.value === generatorType ? 'selected' : ''}
+                  onClick={() => {
+                    setGeneratorType(option.value);
+                    setTypeMenuOpen(false);
+                  }}
+                >
+                  <span>{option.label}</span>
+                  {option.value === generatorType && <Check size={18} />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
-      <div className="generator-row">
+      <div className="generator-row generator-row-slider">
         <span>字符</span>
-        <input type="range" min="12" max="40" value={length} onChange={(event) => setLength(Number(event.target.value))} />
-        <strong className="length-value">{length}</strong>
+        <div className="generator-slider-wrap" style={{ '--range-progress': `${lengthProgress}%` } as CSSProperties}>
+          <input
+            className="generator-slider"
+            type="range"
+            min={passwordLengthLimits.min}
+            max={passwordLengthLimits.max}
+            value={length}
+            aria-label="密码字符数"
+            onChange={(event) => setClampedLength(Number(event.target.value))}
+          />
+          <input
+            className="length-value"
+            type="number"
+            min={passwordLengthLimits.min}
+            max={passwordLengthLimits.max}
+            value={length}
+            aria-label="密码长度"
+            onChange={(event) => setClampedLength(Number(event.target.value))}
+          />
+        </div>
       </div>
       <div className="generator-row">
         <span>数字</span>
-        <button className={`switch ${includeNumbers ? 'on' : ''}`} onClick={() => setIncludeNumbers((value) => !value)} />
+        <button
+          type="button"
+          className={`switch ${includeNumbers ? 'on' : ''}`}
+          aria-pressed={includeNumbers}
+          aria-label="包含数字"
+          onClick={() => setIncludeNumbers((value) => !value)}
+        />
       </div>
       <div className="generator-row">
         <span>符号</span>
-        <button className={`switch ${includeSymbols ? 'on' : ''}`} onClick={() => setIncludeSymbols((value) => !value)} />
+        <button
+          type="button"
+          className={`switch ${includeSymbols ? 'on' : ''}`}
+          aria-pressed={includeSymbols}
+          aria-label="包含符号"
+          onClick={() => setIncludeSymbols((value) => !value)}
+        />
       </div>
     </div>
   );

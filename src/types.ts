@@ -20,6 +20,7 @@ export type LoginItem = {
   username: string;
   password: string;
   website: string;
+  websites?: string[];
   notes: string;
   tags: string[];
   favorite: boolean;
@@ -27,11 +28,33 @@ export type LoginItem = {
   updated_at: string;
 };
 
+export type PasswordItem = {
+  id: string;
+  item_type: 'password';
+  title: string;
+  password: string;
+  notes: string;
+  tags: string[];
+  favorite: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VaultItem = LoginItem | PasswordItem;
+
 export type LoginInput = {
   title: string;
   username: string;
   password: string;
   website: string;
+  websites: string[];
+  notes: string;
+  tags: string[];
+};
+
+export type PasswordInput = {
+  title: string;
+  password: string;
   notes: string;
   tags: string[];
 };

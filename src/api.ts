@@ -1,5 +1,14 @@
 import { invoke, isTauri as isTauriRuntime } from '@tauri-apps/api/core';
-import type { GeneratedPasswordOptions, ItemOverview, LoginInput, LoginItem, VaultStatus } from './types';
+import type {
+  GeneratedPasswordOptions,
+  ItemOverview,
+  LoginInput,
+  LoginItem,
+  PasswordInput,
+  PasswordItem,
+  VaultItem,
+  VaultStatus,
+} from './types';
 
 type Api = {
   getStatus(): Promise<VaultStatus>;
@@ -7,13 +16,14 @@ type Api = {
   unlock(masterPassword: string): Promise<VaultStatus>;
   lock(): Promise<VaultStatus>;
   listItems(): Promise<ItemOverview[]>;
-  getItem(id: string): Promise<LoginItem>;
+  getItem(id: string): Promise<VaultItem>;
   createLogin(input: LoginInput): Promise<LoginItem>;
-  setFavorite(id: string, favorite: boolean): Promise<LoginItem>;
+  createPassword(input: PasswordInput): Promise<PasswordItem>;
+  setFavorite(id: string, favorite: boolean): Promise<VaultItem>;
   generatePassword(options: GeneratedPasswordOptions): Promise<string>;
 };
 
-const demoItems: LoginItem[] = [
+const demoItems: VaultItem[] = [
   {
     id: 'demo-mintlify',
     item_type: 'login',
@@ -21,6 +31,7 @@ const demoItems: LoginItem[] = [
     username: 'heihuzicity@gmail.com',
     password: 'yUndKy6izwkvT26sRrib',
     website: 'https://app.mintlify.com',
+    websites: ['https://app.mintlify.com'],
     notes: 'Company name\nheihuzi-ai',
     tags: [],
     favorite: true,
@@ -34,6 +45,7 @@ const demoItems: LoginItem[] = [
     username: 'vim27@qq.com',
     password: '8HTnfpWgFhsskXJNEzrE',
     website: 'https://example.com',
+    websites: ['https://example.com'],
     notes: '',
     tags: [],
     favorite: false,
@@ -47,7 +59,19 @@ const demoItems: LoginItem[] = [
     username: 'vim27@qq.com',
     password: 'N9wQn3m9rZ',
     website: 'https://platform.openai.com',
+    websites: ['https://platform.openai.com'],
     notes: '',
+    tags: [],
+    favorite: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 'demo-wifi-password',
+    item_type: 'password',
+    title: 'WiFi 密码',
+    password: '8HTnfpWgFhsskXJNEzrE',
+    notes: '本地演示用的独立密码项目。',
     tags: [],
     favorite: false,
     created_at: new Date().toISOString(),
@@ -55,12 +79,12 @@ const demoItems: LoginItem[] = [
   },
 ];
 
-const toOverview = (item: LoginItem): ItemOverview => ({
+const toOverview = (item: VaultItem): ItemOverview => ({
   id: item.id,
   item_type: item.item_type,
   title: item.title,
-  subtitle: item.username,
-  website: item.website,
+  subtitle: item.item_type === 'login' ? item.username : '密码',
+  website: item.item_type === 'login' ? item.website : undefined,
   icon_text: item.title.slice(0, 2),
   favorite: item.favorite,
   updated_at: item.updated_at,
@@ -106,6 +130,23 @@ const browserPreviewApi: Api = {
       username: input.username,
       password: input.password,
       website: input.website,
+      websites: input.websites,
+      notes: input.notes,
+      tags: input.tags,
+      favorite: false,
+      created_at: now,
+      updated_at: now,
+    };
+    demoItems.unshift(item);
+    return item;
+  },
+  async createPassword(input: PasswordInput) {
+    const now = new Date().toISOString();
+    const item: PasswordItem = {
+      id: crypto.randomUUID(),
+      item_type: 'password',
+      title: input.title || '未命名密码',
+      password: input.password,
       notes: input.notes,
       tags: input.tags,
       favorite: false,
@@ -132,9 +173,10 @@ const tauriApi: Api = {
   unlock: (masterPassword) => invoke<VaultStatus>('unlock_vault', { masterPassword }),
   lock: () => invoke<VaultStatus>('lock_vault'),
   listItems: () => invoke<ItemOverview[]>('list_items'),
-  getItem: (id) => invoke<LoginItem>('get_item', { id }),
+  getItem: (id) => invoke<VaultItem>('get_item', { id }),
   createLogin: (input) => invoke<LoginItem>('create_login', { input }),
-  setFavorite: (id, favorite) => invoke<LoginItem>('set_item_favorite', { id, favorite }),
+  createPassword: (input) => invoke<PasswordItem>('create_password', { input }),
+  setFavorite: (id, favorite) => invoke<VaultItem>('set_item_favorite', { id, favorite }),
   generatePassword: (options) => invoke<string>('generate_password', { options }),
 };
 
