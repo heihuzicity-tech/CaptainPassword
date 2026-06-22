@@ -23,6 +23,7 @@ type Api = {
   updateItem(id: string, input: EditableItemInput): Promise<VaultItem>;
   setFavorite(id: string, favorite: boolean): Promise<VaultItem>;
   generatePassword(options: GeneratedPasswordOptions): Promise<string>;
+  copyText(value: string): Promise<void>;
 };
 
 const demoItems: VaultItem[] = [
@@ -212,6 +213,27 @@ const browserPreviewApi: Api = {
   async generatePassword(options: GeneratedPasswordOptions) {
     return randomPassword(options);
   },
+  async copyText(value: string) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(value);
+        return;
+      } catch {
+        // Fall back below for browser previews that deny async clipboard writes.
+      }
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    if (!copied) throw new Error('Clipboard copy was rejected');
+  },
 };
 
 const tauriApi: Api = {
@@ -226,6 +248,7 @@ const tauriApi: Api = {
   updateItem: (id, input) => invoke<VaultItem>('update_item', { id, input }),
   setFavorite: (id, favorite) => invoke<VaultItem>('set_item_favorite', { id, favorite }),
   generatePassword: (options) => invoke<string>('generate_password', { options }),
+  copyText: (value) => invoke<void>('copy_text', { value }),
 };
 
 export const api: Api = isTauriRuntime() ? tauriApi : browserPreviewApi;

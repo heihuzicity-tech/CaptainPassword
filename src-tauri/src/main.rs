@@ -716,6 +716,12 @@ fn generate_password(options: GeneratedPasswordOptions) -> Result<String, String
     String::from_utf8(password).map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+fn copy_text(value: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard.set_text(value).map_err(|err| err.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -730,8 +736,9 @@ fn main() {
             create_password,
             update_item,
             set_item_favorite,
-            generate_password
+            generate_password,
+            copy_text
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OnePass Local");
+        .expect("error while running 船长密码箱");
 }

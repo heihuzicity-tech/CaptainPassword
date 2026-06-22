@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OnePass Local",
+  "productName": "船长密码箱",
   "version": "0.1.0",
   "identifier": "ai.heihuzi.onepass",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "OnePass Local",
+        "title": "船长密码箱",
         "width": 1220,
         "height": 780,
         "minWidth": 980,
@@ -23,6 +23,25 @@
         "trafficLightPosition": {
           "x": 16,
           "y": 17
+        }
+      },
+      {
+        "label": "quick-search",
+        "title": "船长密码箱",
+        "url": "index.html?window=quick-search",
+        "width": 380,
+        "height": 190,
+        "minWidth": 340,
+        "minHeight": 180,
+        "center": true,
+        "visible": false,
+        "resizable": true,
+        "skipTaskbar": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 13
         }
       }
     ],

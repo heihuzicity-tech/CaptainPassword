@@ -26,6 +26,7 @@ import {
   CarFront,
   Check,
   ChevronDown,
+  Command,
   CreditCard,
   Database,
   Edit3,
@@ -48,6 +49,8 @@ import {
   MoreVertical,
   PanelLeftClose,
   PanelLeftOpen,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Search,
@@ -69,6 +72,9 @@ import type {
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from 'react';
+import { isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from './api';
 import type {
   EditableItemInput,
@@ -91,12 +97,58 @@ type ResizablePane = 'sidebar' | 'itemList';
 type FieldBorderStyle = 'top' | 'middle' | 'bottom' | 'single';
 type FieldTone = 'primary' | 'secondary';
 type PasswordGeneratorType = 'random' | 'memorable' | 'pin';
+type AppWindowMode = 'main' | 'quick-search';
+type QuickCopyField = {
+  id: string;
+  label: string;
+  value: string;
+  secret?: boolean;
+  primary?: boolean;
+};
 
+const APP_NAME = '船长密码箱';
+const QUICK_WINDOW_LABEL = 'quick-search';
+const quickWindowWidth = 380;
 const sidebarWidthLimits = { min: 230, max: 420, default: 276 };
 const itemListWidthLimits = { min: 300, max: 520, default: 354 };
 const passwordLengthLimits = { min: 8, max: 40, default: 8 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const currentWindowMode = (): AppWindowMode => {
+  if (window.location.search.includes(`window=${QUICK_WINDOW_LABEL}`)) return QUICK_WINDOW_LABEL;
+  if (!isTauri()) return 'main';
+  return getCurrentWindow().label === QUICK_WINDOW_LABEL ? 'quick-search' : 'main';
+};
+
+const getTauriWindow = async (label: string) => (isTauri() ? WebviewWindow.getByLabel(label) : null);
+
+const openQuickSearchWindow = async () => {
+  const quickWindow = await getTauriWindow(QUICK_WINDOW_LABEL);
+  if (!quickWindow) return;
+  await quickWindow.show();
+  await quickWindow.setFocus();
+};
+
+const hideQuickSearchWindow = async () => {
+  const quickWindow = await getTauriWindow(QUICK_WINDOW_LABEL);
+  await quickWindow?.hide();
+};
+
+const focusMainWindow = async () => {
+  const mainWindow = await getTauriWindow('main');
+  if (!mainWindow) return;
+  await mainWindow.show();
+  await mainWindow.setFocus();
+};
+
+const hideCurrentWindow = async () => {
+  if (!isTauri()) return;
+  await getCurrentWindow().hide();
+};
+
+const writeClipboard = async (value: string) => {
+  await api.copyText(value);
+};
 
 const itemTypes: Array<{ type: ItemType; label: string; icon: JSX.Element; implemented: boolean }> = [
   { type: 'login', label: '登录信息', icon: <KeyRound />, implemented: true },
@@ -196,6 +248,11 @@ const websitePatch = (
 };
 
 export function App() {
+  const [mode] = useState<AppWindowMode>(() => currentWindowMode());
+  return mode === 'quick-search' ? <QuickSearchWindow /> : <MainApp />;
+}
+
+function MainApp() {
   const [status, setStatus] = useState<VaultStatus>('locked');
   const [items, setItems] = useState<ItemOverview[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
@@ -286,6 +343,14 @@ export function App() {
     return updatedItem;
   };
 
+  const handleLock = async () => {
+    const nextStatus = await api.lock();
+    setStatus(nextStatus);
+    setSelectedId(undefined);
+    setSelectedItem(undefined);
+    await hideQuickSearchWindow();
+  };
+
   const setPaneWidth = useCallback((pane: ResizablePane, value: number) => {
     if (pane === 'sidebar') {
       setSidebarWidth(clamp(value, sidebarWidthLimits.min, sidebarWidthLimits.max));
@@ -348,11 +413,7 @@ export function App() {
             selectedView={sidebarView}
             onViewChange={setSidebarView}
             onToggleSidebar={() => setSidebarCollapsed(true)}
-            onLock={async () => {
-              const nextStatus = await api.lock();
-              setStatus(nextStatus);
-              setSelectedId(undefined);
-            }}
+            onLock={handleLock}
           />
           <PaneResizer
             className="sidebar-resizer"
@@ -369,6 +430,7 @@ export function App() {
           sidebarCollapsed={sidebarCollapsed}
           onQueryChange={setQuery}
           onToggleSidebar={() => setSidebarCollapsed(false)}
+          onOpenQuickSearch={() => void openQuickSearchWindow()}
           onNewItem={() => setOverlay({ kind: 'type-picker' })}
         />
         <section className="content-split">
@@ -457,7 +519,7 @@ function SetupScreen({
 
   return (
     <AuthScreen
-      title="创建本地密码库"
+      title={`创建${APP_NAME}`}
       description="主密码只在本机用于解锁加密数据，不会写入数据库。"
       error={error}
       password={password}
@@ -496,7 +558,7 @@ function UnlockScreen({
 
   return (
     <AuthScreen
-      title="OnePass Local 已锁定"
+      title={`${APP_NAME} 已锁定`}
       description="输入主密码后才会在内存中解开本地密钥。"
       error={error}
       password={password}
@@ -566,6 +628,374 @@ function AuthScreen({
         </button>
       </div>
     </div>
+  );
+}
+
+const normalizedQuickQuery = (value: string) => value.trim().toLowerCase();
+
+const quickItemMatches = (item: ItemOverview, query: string) => {
+  if (!query) return true;
+  return [item.title, item.subtitle, item.website].some((value) => value?.toLowerCase().includes(query));
+};
+
+const quickCopyFieldsForItem = (item: VaultItem): QuickCopyField[] => {
+  if (item.item_type === 'password') {
+    return [
+      { id: 'password', label: '密码', value: item.password, secret: true, primary: true },
+      ...(item.notes.trim() ? [{ id: 'notes', label: '备注', value: item.notes }] : []),
+    ];
+  }
+
+  const websites = item.websites?.length ? item.websites : [item.website];
+  const websiteFields: QuickCopyField[] = websites
+    .map((website, index) => ({
+      id: `website-${index}`,
+      label: websiteLabelOrDefault(item.website_labels?.[index]),
+      value: website,
+    }))
+    .filter((field) => field.value.trim().length > 0);
+
+  return [
+    { id: 'username', label: '用户名', value: item.username },
+    { id: 'password', label: '密码', value: item.password, secret: true, primary: true },
+    ...websiteFields,
+    ...(item.notes.trim() ? [{ id: 'notes', label: '备注', value: item.notes }] : []),
+  ];
+};
+
+function QuickSearchWindow() {
+  const [status, setStatus] = useState<VaultStatus>('locked');
+  const [items, setItems] = useState<ItemOverview[]>([]);
+  const [query, setQuery] = useState('');
+  const [focusedIndex, setFocusedIndex] = useState<number>();
+  const [activeItemId, setActiveItemId] = useState<string>();
+  const [selectedItem, setSelectedItem] = useState<VaultItem>();
+  const [expanded, setExpanded] = useState(true);
+  const [pinned, setPinned] = useState(false);
+  const [copiedFieldId, setCopiedFieldId] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshQuickState = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const nextStatus = await api.getStatus();
+      setStatus(nextStatus);
+      if (nextStatus !== 'unlocked') {
+        setItems([]);
+        setSelectedItem(undefined);
+        setActiveItemId(undefined);
+        return;
+      }
+      const nextItems = await api.listItems();
+      setItems(nextItems);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshQuickState();
+    const focusSearch = () => {
+      void refreshQuickState();
+      window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    };
+    window.addEventListener('focus', focusSearch);
+    return () => window.removeEventListener('focus', focusSearch);
+  }, [refreshQuickState]);
+
+  useEffect(() => {
+    searchInputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return undefined;
+    let dispose: (() => void) | undefined;
+    void getCurrentWindow().onCloseRequested((event) => {
+      event.preventDefault();
+      void hideCurrentWindow();
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+    return () => dispose?.();
+  }, []);
+
+  const filteredItems = useMemo(() => {
+    const normalizedQuery = normalizedQuickQuery(query);
+    if (!normalizedQuery) return [];
+    return items
+      .filter((item) => quickItemMatches(item, normalizedQuery))
+      .sort((left, right) => {
+        if (left.favorite !== right.favorite) return left.favorite ? -1 : 1;
+        return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+      })
+      .slice(0, 8);
+  }, [items, query]);
+
+  useEffect(() => {
+    setFocusedIndex(undefined);
+    setActiveItemId(undefined);
+    setSelectedItem(undefined);
+  }, [query]);
+
+  useEffect(() => {
+    if (filteredItems.length === 0) {
+      setFocusedIndex(undefined);
+      return;
+    }
+    if (focusedIndex !== undefined && focusedIndex >= filteredItems.length) {
+      setFocusedIndex(filteredItems.length - 1);
+    }
+  }, [filteredItems.length, focusedIndex]);
+
+  const selectedOverview = activeItemId
+    ? filteredItems.find((item) => item.id === activeItemId) ?? items.find((item) => item.id === activeItemId)
+    : undefined;
+  const hasQuery = normalizedQuickQuery(query).length > 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (status !== 'unlocked' || !selectedOverview) {
+      setSelectedItem(undefined);
+      return undefined;
+    }
+    api
+      .getItem(selectedOverview.id)
+      .then((item) => {
+        if (!cancelled) setSelectedItem(item);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedOverview, status]);
+
+  const quickFields = useMemo(() => (selectedItem ? quickCopyFieldsForItem(selectedItem) : []), [selectedItem]);
+  const primaryField = quickFields.find((field) => field.primary) ?? quickFields[0];
+  const visibleFields = expanded ? quickFields : quickFields.slice(0, 2);
+  const clearQuickSearch = useCallback(() => {
+    setQuery('');
+    setFocusedIndex(undefined);
+    setActiveItemId(undefined);
+    setSelectedItem(undefined);
+    setCopiedFieldId(undefined);
+    setExpanded(true);
+    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri() || status !== 'unlocked') return;
+
+    const resultRows = hasQuery ? Math.min(filteredItems.length || 1, 5) : 0;
+    const resultBlockHeight = resultRows * 55;
+    const detailHeight = selectedOverview ? visibleFields.length * 44 + (quickFields.length > 2 ? 34 : 0) : 0;
+    const baseHeight = 34 + 58 + 34;
+    const nextHeight = selectedOverview
+      ? clamp(baseHeight + resultBlockHeight + detailHeight + 10, 300, 500)
+      : clamp(baseHeight + resultBlockHeight, hasQuery ? 200 : 180, 400);
+
+    void getCurrentWindow()
+      .setSize(new LogicalSize(quickWindowWidth, Math.round(nextHeight)))
+      .catch((err) => console.warn('Unable to resize quick search window', err));
+  }, [filteredItems.length, hasQuery, quickFields.length, selectedOverview, status, visibleFields.length]);
+
+  const copyQuickField = async (field: QuickCopyField) => {
+    const nextStatus = await api.getStatus();
+    if (nextStatus !== 'unlocked') {
+      setStatus(nextStatus);
+      setSelectedItem(undefined);
+      return;
+    }
+
+    try {
+      await writeClipboard(field.value);
+      setError('');
+      setCopiedFieldId(field.id);
+      window.setTimeout(() => setCopiedFieldId((current) => (current === field.id ? undefined : current)), 1200);
+    } catch (err) {
+      setError(`复制失败：${String(err)}`);
+      return;
+    }
+
+    if (!pinned) {
+      window.setTimeout(() => void hideCurrentWindow(), 360);
+    }
+  };
+
+  const togglePinned = async () => {
+    const nextPinned = !pinned;
+    setPinned(nextPinned);
+    if (isTauri()) {
+      await getCurrentWindow().setAlwaysOnTop(nextPinned);
+    }
+  };
+
+  const handleQuickKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing) return;
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (query.trim().length > 0 || activeItemId) {
+        clearQuickSearch();
+        return;
+      }
+      if (pinned) {
+        clearQuickSearch();
+        return;
+      }
+      void hideCurrentWindow();
+      return;
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setFocusedIndex((current) => {
+        if (filteredItems.length === 0) return undefined;
+        return Math.min((current ?? -1) + 1, filteredItems.length - 1);
+      });
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setFocusedIndex((current) => {
+        if (filteredItems.length === 0) return undefined;
+        return Math.max((current ?? filteredItems.length) - 1, 0);
+      });
+      return;
+    }
+
+    if (event.key === 'ArrowRight') {
+      setExpanded(true);
+      return;
+    }
+
+    if (event.key === 'ArrowLeft') {
+      setExpanded(false);
+      return;
+    }
+
+    const numericShortcut = Number(event.key);
+    if ((event.metaKey || event.ctrlKey) && numericShortcut >= 1 && numericShortcut <= visibleFields.length) {
+      event.preventDefault();
+      void copyQuickField(visibleFields[numericShortcut - 1]);
+      return;
+    }
+
+    if (event.key === 'Enter' && primaryField) {
+      event.preventDefault();
+      void copyQuickField(primaryField);
+    }
+  };
+
+  if (status !== 'unlocked') {
+    return (
+      <section className={`quick-shell quick-locked ${isTauri() ? 'native-titlebar' : ''}`} data-tauri-drag-region="deep" onMouseDown={startWindowDrag}>
+        <header className="quick-titlebar" />
+        <div className="quick-locked-body">
+          <div className="auth-mark quick-auth-mark">
+            <Lock size={30} />
+          </div>
+          <h1>{APP_NAME} 已锁定</h1>
+          <p>请先在主窗口解锁。</p>
+          <button className="primary-button" onClick={() => void focusMainWindow()}>
+            打开主窗口
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className={`quick-shell ${isTauri() ? 'native-titlebar' : ''}`} data-tauri-drag-region="deep" onMouseDown={startWindowDrag} onKeyDown={handleQuickKeyDown}>
+      <header className="quick-titlebar">
+        <div className="quick-window-actions">
+          <button className={`icon-button quick-pin-button ${pinned ? 'active' : ''}`} aria-label="钉住迷你查询" onClick={() => void togglePinned()}>
+            {pinned ? <PinOff size={18} /> : <Pin size={18} />}
+          </button>
+        </div>
+      </header>
+
+      <label className="quick-search-box">
+        <Search size={20} />
+        <input
+          ref={searchInputRef}
+          value={query}
+          placeholder="搜索项目"
+          autoFocus
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+
+      {error && <div className="quick-error">{error}</div>}
+
+      <div className={`quick-content ${selectedOverview ? '' : 'no-active'}`}>
+        <div className={`quick-results ${!hasQuery ? 'empty-query' : ''}`} role="listbox" aria-label="迷你查询结果">
+          {loading && <div className="quick-empty">正在读取...</div>}
+          {!loading && !hasQuery && <div className="quick-empty">输入关键词查找项目</div>}
+          {!loading && hasQuery && filteredItems.length === 0 && <div className="quick-empty">没有匹配项目</div>}
+          {filteredItems.map((item, index) => (
+            <button
+              key={item.id}
+              className={`quick-result-row ${item.id === activeItemId ? 'selected' : ''} ${
+                index === focusedIndex && item.id !== activeItemId ? 'focused' : ''
+              }`}
+              role="option"
+              aria-selected={item.id === activeItemId}
+              onMouseEnter={() => setFocusedIndex(index)}
+              onClick={() => {
+                setFocusedIndex(index);
+                setActiveItemId(item.id);
+                setExpanded(true);
+              }}
+            >
+              <ItemIcon item={item} />
+              <span className="quick-result-text">
+                <strong>{item.title}</strong>
+                <span>{item.subtitle || item.website || '密码'}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {selectedOverview && (
+          <div className="quick-detail">
+            <div className="quick-field-list">
+              {visibleFields.map((field, index) => (
+                <button
+                  type="button"
+                  key={field.id}
+                  className={`quick-copy-field ${copiedFieldId === field.id ? 'copied' : ''}`}
+                  aria-label={`复制${field.label}`}
+                  onClick={() => void copyQuickField(field)}
+                >
+                  <span className="quick-copy-label">
+                    <span>{field.label}</span>
+                  </span>
+                  <strong className={field.secret ? 'password-value' : undefined}>
+                    {field.secret ? '••••••••••' : field.value || '空'}
+                  </strong>
+                  {copiedFieldId === field.id && <span className="quick-copy-state">已复制</span>}
+                </button>
+              ))}
+            </div>
+
+            {quickFields.length > 2 && (
+              <button className="quick-expand-button" onClick={() => setExpanded((value) => !value)}>
+                {expanded ? '收起' : '显示更多'}
+                <ChevronDown size={16} className={expanded ? 'rotate-left' : ''} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -667,12 +1097,14 @@ function TopToolbar({
   sidebarCollapsed,
   onQueryChange,
   onToggleSidebar,
+  onOpenQuickSearch,
   onNewItem,
 }: {
   query: string;
   sidebarCollapsed: boolean;
   onQueryChange: (value: string) => void;
   onToggleSidebar: () => void;
+  onOpenQuickSearch: () => void;
   onNewItem: () => void;
 }) {
   return (
@@ -690,6 +1122,9 @@ function TopToolbar({
         <Search size={20} />
         <input value={query} placeholder="在“ya zhang”中搜索" onChange={(event) => onQueryChange(event.target.value)} />
       </label>
+      <button className="icon-button quick-tool-trigger" aria-label="打开迷你查询" onClick={onOpenQuickSearch}>
+        <Command size={20} />
+      </button>
       <button className="link-button">帮助</button>
       <button className="primary-button new-item" onClick={onNewItem}>
         <Plus size={21} />

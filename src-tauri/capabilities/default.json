@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Permissions required by the main OnePass Local window.",
-  "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "description": "Permissions required by the 船长密码箱 desktop windows.",
+  "windows": ["main", "quick-search"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
+    "core:window:allow-start-dragging"
+  ]
 }
