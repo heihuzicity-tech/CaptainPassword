@@ -6,6 +6,7 @@ import {
   BookUser,
   Braces,
   CarFront,
+  Check,
   ChevronDown,
   CreditCard,
   Database,
@@ -25,6 +26,8 @@ import {
   Mail,
   MinusCircle,
   MoreVertical,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw,
   Search,
@@ -40,14 +43,23 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { api } from './api';
 import type { ItemOverview, ItemType, LoginInput, LoginItem, VaultStatus } from './types';
+import { startWindowDrag } from './windowDrag';
 
 type Overlay =
   | { kind: 'none' }
   | { kind: 'type-picker' }
   | { kind: 'editor'; itemType: ItemType };
-type SidebarView = 'all' | 'favorites' | 'logins';
+type SidebarView = 'all' | 'favorites';
+type CategoryFilter = 'all' | ItemType;
+type ResizablePane = 'sidebar' | 'itemList';
+
+const sidebarWidthLimits = { min: 230, max: 420, default: 276 };
+const itemListWidthLimits = { min: 300, max: 520, default: 354 };
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const itemTypes: Array<{ type: ItemType; label: string; icon: JSX.Element; implemented: boolean }> = [
   { type: 'login', label: '登录信息', icon: <KeyRound />, implemented: true },
@@ -56,6 +68,11 @@ const itemTypes: Array<{ type: ItemType; label: string; icon: JSX.Element; imple
   { type: 'identity', label: '身份标识', icon: <IdCard />, implemented: false },
   { type: 'password', label: '密码', icon: <KeyRound />, implemented: false },
   { type: 'document', label: '文档', icon: <FileText />, implemented: false },
+];
+
+const categoryOptions: Array<{ value: CategoryFilter; label: string; icon: JSX.Element }> = [
+  { value: 'all', label: '所有类别', icon: <Grid2X2 /> },
+  ...itemTypes.map((item) => ({ value: item.type, label: item.label, icon: item.icon })),
 ];
 
 const moreItemTypes: Array<{ label: string; icon: JSX.Element }> = [
@@ -94,8 +111,22 @@ export function App() {
   const [selectedItem, setSelectedItem] = useState<LoginItem>();
   const [query, setQuery] = useState('');
   const [sidebarView, setSidebarView] = useState<SidebarView>('all');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(sidebarWidthLimits.default);
+  const [itemListWidth, setItemListWidth] = useState(itemListWidthLimits.default);
+  const [resizingPane, setResizingPane] = useState<ResizablePane>();
   const [overlay, setOverlay] = useState<Overlay>({ kind: 'none' });
   const [error, setError] = useState('');
+
+  const shellStyle = useMemo(
+    () =>
+      ({
+        '--sidebar-width': `${sidebarWidth}px`,
+        '--item-list-width': `${itemListWidth}px`,
+      }) as CSSProperties,
+    [itemListWidth, sidebarWidth],
+  );
 
   const refreshItems = useCallback(async () => {
     const nextItems = await api.listItems();
@@ -125,11 +156,22 @@ export function App() {
     const normalized = query.trim().toLowerCase();
     return items.filter((item) => {
       if (sidebarView === 'favorites' && !item.favorite) return false;
-      if (sidebarView === 'logins' && item.item_type !== 'login') return false;
+      if (categoryFilter !== 'all' && item.item_type !== categoryFilter) return false;
       if (!normalized) return true;
       return [item.title, item.subtitle, item.website].some((value) => value?.toLowerCase().includes(normalized));
     });
-  }, [items, query, sidebarView]);
+  }, [categoryFilter, items, query, sidebarView]);
+
+  useEffect(() => {
+    if (status !== 'unlocked') return;
+    if (filteredItems.length === 0) {
+      setSelectedId(undefined);
+      return;
+    }
+    if (!selectedId || !filteredItems.some((item) => item.id === selectedId)) {
+      setSelectedId(filteredItems[0].id);
+    }
+  }, [filteredItems, selectedId, status]);
 
   const handleUnlocked = async (nextStatus: VaultStatus) => {
     setStatus(nextStatus);
@@ -145,6 +187,52 @@ export function App() {
     );
   };
 
+  const setPaneWidth = useCallback((pane: ResizablePane, value: number) => {
+    if (pane === 'sidebar') {
+      setSidebarWidth(clamp(value, sidebarWidthLimits.min, sidebarWidthLimits.max));
+      return;
+    }
+    setItemListWidth(clamp(value, itemListWidthLimits.min, itemListWidthLimits.max));
+  }, []);
+
+  const beginPaneResize = useCallback(
+    (pane: ResizablePane, event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = pane === 'sidebar' ? sidebarWidth : itemListWidth;
+      setResizingPane(pane);
+      document.body.classList.add('is-resizing-pane');
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        setPaneWidth(pane, startWidth + moveEvent.clientX - startX);
+      };
+      const stopResize = () => {
+        setResizingPane(undefined);
+        document.body.classList.remove('is-resizing-pane');
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', stopResize);
+        window.removeEventListener('pointercancel', stopResize);
+      };
+
+      window.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', stopResize);
+      window.addEventListener('pointercancel', stopResize);
+    },
+    [itemListWidth, setPaneWidth, sidebarWidth],
+  );
+
+  const handlePaneResizeKey = useCallback(
+    (pane: ResizablePane, event: ReactKeyboardEvent<HTMLDivElement>) => {
+      const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+      if (!direction) return;
+      event.preventDefault();
+      const currentWidth = pane === 'sidebar' ? sidebarWidth : itemListWidth;
+      setPaneWidth(pane, currentWidth + direction * 12);
+    },
+    [itemListWidth, setPaneWidth, sidebarWidth],
+  );
+
   if (status === 'no_vault') {
     return <SetupScreen error={error} onError={setError} onReady={handleUnlocked} />;
   }
@@ -154,20 +242,53 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar
-        selectedView={sidebarView}
-        onViewChange={setSidebarView}
-        onLock={async () => {
-          const nextStatus = await api.lock();
-          setStatus(nextStatus);
-          setSelectedId(undefined);
-        }}
-      />
+    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={shellStyle}>
+      {!sidebarCollapsed && (
+        <>
+          <Sidebar
+            selectedView={sidebarView}
+            onViewChange={setSidebarView}
+            onToggleSidebar={() => setSidebarCollapsed(true)}
+            onLock={async () => {
+              const nextStatus = await api.lock();
+              setStatus(nextStatus);
+              setSelectedId(undefined);
+            }}
+          />
+          <PaneResizer
+            className="sidebar-resizer"
+            active={resizingPane === 'sidebar'}
+            label="调整侧边栏宽度"
+            onPointerDown={(event) => beginPaneResize('sidebar', event)}
+            onKeyDown={(event) => handlePaneResizeKey('sidebar', event)}
+          />
+        </>
+      )}
       <main className="main-area">
-        <TopToolbar query={query} onQueryChange={setQuery} onNewItem={() => setOverlay({ kind: 'type-picker' })} />
+        <TopToolbar
+          query={query}
+          sidebarCollapsed={sidebarCollapsed}
+          onQueryChange={setQuery}
+          onToggleSidebar={() => setSidebarCollapsed(false)}
+          onNewItem={() => setOverlay({ kind: 'type-picker' })}
+        />
         <section className="content-split">
-          <ItemListPane items={filteredItems} selectedId={selectedId} onSelect={setSelectedId} />
+          <ItemListPane
+            items={filteredItems}
+            selectedId={selectedId}
+            sidebarCollapsed={sidebarCollapsed}
+            viewTitle={sidebarView === 'favorites' ? '收藏夹' : '所有项目'}
+            categoryFilter={categoryFilter}
+            onCategoryChange={setCategoryFilter}
+            onSelect={setSelectedId}
+          />
+          <PaneResizer
+            className="item-list-resizer"
+            active={resizingPane === 'itemList'}
+            label="调整项目列表宽度"
+            onPointerDown={(event) => beginPaneResize('itemList', event)}
+            onKeyDown={(event) => handlePaneResizeKey('itemList', event)}
+          />
           <DetailPane item={selectedItem} onFavoriteChange={handleFavoriteChange} />
         </section>
       </main>
@@ -344,14 +465,19 @@ function AuthScreen({
 function Sidebar({
   selectedView,
   onViewChange,
+  onToggleSidebar,
   onLock,
 }: {
   selectedView: SidebarView;
   onViewChange: (view: SidebarView) => void;
+  onToggleSidebar: () => void;
   onLock: () => void;
 }) {
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" data-tauri-drag-region="deep" onMouseDown={startWindowDrag}>
+      <button className="sidebar-toggle-button" aria-label="折叠侧边栏" onClick={onToggleSidebar}>
+        <PanelLeftClose size={22} />
+      </button>
       <div className="sidebar-account">
         <div className="avatar">ya</div>
         <div className="account-name">ya zhang</div>
@@ -366,12 +492,6 @@ function Sidebar({
           tone="favorite"
           onClick={() => onViewChange('favorites')}
         />
-        <SidebarButton
-          icon={<KeyRound />}
-          label="登录信息"
-          selected={selectedView === 'logins'}
-          onClick={() => onViewChange('logins')}
-        />
       </nav>
       <div className="sidebar-footer">
         <button className="sidebar-button compact" onClick={onLock}>
@@ -380,6 +500,32 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  );
+}
+
+function PaneResizer({
+  className,
+  active,
+  label,
+  onPointerDown,
+  onKeyDown,
+}: {
+  className: string;
+  active: boolean;
+  label: string;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      className={`pane-resizer ${className} ${active ? 'active' : ''}`}
+      role="separator"
+      aria-label={label}
+      aria-orientation="vertical"
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    />
   );
 }
 
@@ -411,23 +557,28 @@ function SidebarButton({
 
 function TopToolbar({
   query,
+  sidebarCollapsed,
   onQueryChange,
+  onToggleSidebar,
   onNewItem,
 }: {
   query: string;
+  sidebarCollapsed: boolean;
   onQueryChange: (value: string) => void;
+  onToggleSidebar: () => void;
   onNewItem: () => void;
 }) {
   return (
-    <header className="top-toolbar">
-      <div className="history-buttons">
-        <button className="icon-button" aria-label="返回">
-          <ArrowLeft size={21} />
+    <header
+      className={`top-toolbar ${sidebarCollapsed ? 'with-sidebar-toggle' : ''}`}
+      data-tauri-drag-region="deep"
+      onMouseDown={startWindowDrag}
+    >
+      {sidebarCollapsed && (
+        <button className="icon-button toolbar-sidebar-toggle" aria-label="展开侧边栏" onClick={onToggleSidebar}>
+          <PanelLeftOpen size={21} />
         </button>
-        <button className="icon-button" aria-label="前进">
-          <ArrowLeft size={21} className="flip" />
-        </button>
-      </div>
+      )}
       <label className="global-search">
         <Search size={20} />
         <input value={query} placeholder="在“ya zhang”中搜索" onChange={(event) => onQueryChange(event.target.value)} />
@@ -444,27 +595,67 @@ function TopToolbar({
 function ItemListPane({
   items,
   selectedId,
+  sidebarCollapsed,
+  viewTitle,
+  categoryFilter,
+  onCategoryChange,
   onSelect,
 }: {
   items: ItemOverview[];
   selectedId?: string;
+  sidebarCollapsed: boolean;
+  viewTitle: string;
+  categoryFilter: CategoryFilter;
+  onCategoryChange: (category: CategoryFilter) => void;
   onSelect: (id: string) => void;
 }) {
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const selectedCategory = categoryOptions.find((option) => option.value === categoryFilter) ?? categoryOptions[0];
+
   return (
     <section className="item-list-pane">
-      <div className="list-head">
-        <button className="category-button">
-          <Grid2X2 size={20} />
-          所有类别
-          <ChevronDown size={17} />
-        </button>
-        <div className="list-tools">
-          <button className="icon-button" aria-label="筛选">
-            <Search size={18} />
-          </button>
-          <button className="icon-button" aria-label="排序">
-            <ListFilter size={18} />
-          </button>
+      <div className={`list-head ${sidebarCollapsed ? 'with-title' : ''}`}>
+        {sidebarCollapsed && <h2 className="list-title">{viewTitle}</h2>}
+        <div className="list-controls">
+          <div className="category-control">
+            <button
+              className={`category-button ${categoryFilter !== 'all' ? 'filtered' : ''}`}
+              aria-expanded={categoryOpen}
+              onClick={() => setCategoryOpen((value) => !value)}
+            >
+              <span className={`category-button-icon category-icon-${selectedCategory.value}`}>{selectedCategory.icon}</span>
+              {selectedCategory.label}
+              <ChevronDown size={17} />
+            </button>
+            {categoryOpen && (
+              <div className="category-menu">
+                {categoryOptions.map((option, index) => (
+                  <button
+                    key={option.value}
+                    className={`category-option ${option.value === categoryFilter ? 'selected' : ''} ${
+                      index === 1 ? 'after-divider' : ''
+                    }`}
+                    onClick={() => {
+                      onCategoryChange(option.value);
+                      setCategoryOpen(false);
+                    }}
+                  >
+                    <span className={`category-option-icon category-icon-${option.value}`}>{option.icon}</span>
+                    <span>{option.label}</span>
+                    {option.value === categoryFilter && <Check className="category-check" size={22} />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="list-tools">
+            <button className="icon-button" aria-label="筛选">
+              <Search size={18} />
+            </button>
+            <button className="icon-button" aria-label="排序">
+              <ListFilter size={18} />
+            </button>
+          </div>
         </div>
       </div>
       <div className="month-label">2026年6月</div>
