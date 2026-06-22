@@ -1,0 +1,499 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::Mutex,
+};
+
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, OsRng, Payload},
+    aead::rand_core::RngCore,
+    XChaCha20Poly1305, XNonce,
+};
+use chrono::Utc;
+use rand::{seq::SliceRandom, Rng};
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use zeroize::Zeroize;
+
+#[derive(Default)]
+struct AppState {
+    session: Mutex<Option<Session>>,
+}
+
+struct Session {
+    root_key: [u8; 32],
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.root_key.zeroize();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VaultStatus {
+    NoVault,
+    Locked,
+    Unlocked,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CipherBlob {
+    v: u8,
+    alg: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KdfParams {
+    alg: String,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ItemOverview {
+    id: String,
+    item_type: String,
+    title: String,
+    subtitle: String,
+    website: Option<String>,
+    icon_text: String,
+    #[serde(default)]
+    favorite: bool,
+    updated_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LoginDetails {
+    id: String,
+    item_type: String,
+    title: String,
+    username: String,
+    password: String,
+    website: String,
+    notes: String,
+    tags: Vec<String>,
+    #[serde(default)]
+    favorite: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct LoginInput {
+    title: String,
+    username: String,
+    password: String,
+    website: String,
+    notes: String,
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct GeneratedPasswordOptions {
+    length: usize,
+    include_numbers: bool,
+    include_symbols: bool,
+}
+
+fn data_dir() -> Result<PathBuf, String> {
+    let base = dirs::data_local_dir().ok_or_else(|| "Unable to resolve local data directory".to_string())?;
+    Ok(base.join("OnePass Local"))
+}
+
+fn db_path() -> Result<PathBuf, String> {
+    Ok(data_dir()?.join("onepass.sqlite"))
+}
+
+fn open_db() -> Result<Connection, String> {
+    let dir = data_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let conn = Connection::open(db_path()?).map_err(|err| err.to_string())?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|err| err.to_string())?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+fn init_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS keysets (
+          id TEXT PRIMARY KEY,
+          kdf_json TEXT NOT NULL,
+          salt BLOB NOT NULL,
+          encrypted_root_key BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS items (
+          id TEXT PRIMARY KEY,
+          item_type TEXT NOT NULL,
+          encrypted_overview BLOB NOT NULL,
+          encrypted_details BLOB NOT NULL,
+          favorite INTEGER NOT NULL DEFAULT 0,
+          deleted_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1
+        );
+        "#,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let has_favorite_column: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'favorite'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    if has_favorite_column == 0 {
+        conn.execute("ALTER TABLE items ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn has_vault(conn: &Connection) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM keysets", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    Ok(count > 0)
+}
+
+fn derive_unlock_key(master_password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let params = Params::new(19_456, 2, 1, Some(32)).map_err(|err| err.to_string())?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0_u8; 32];
+    argon2
+        .hash_password_into(master_password.as_bytes(), salt, &mut key)
+        .map_err(|err| err.to_string())?;
+    Ok(key)
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0_u8; N];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
+fn encrypt_bytes(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    let nonce = random_bytes::<24>();
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|err| err.to_string())?;
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+        .map_err(|err| err.to_string())?;
+    let blob = CipherBlob {
+        v: 1,
+        alg: "xchacha20poly1305".to_string(),
+        nonce: BASE64.encode(nonce),
+        ciphertext: BASE64.encode(ciphertext),
+    };
+    serde_json::to_vec(&blob).map_err(|err| err.to_string())
+}
+
+fn decrypt_bytes(key: &[u8; 32], aad: &[u8], encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    let blob: CipherBlob = serde_json::from_slice(encrypted).map_err(|err| err.to_string())?;
+    if blob.v != 1 || blob.alg != "xchacha20poly1305" {
+        return Err("Unsupported encrypted blob".to_string());
+    }
+    let nonce = BASE64.decode(blob.nonce).map_err(|err| err.to_string())?;
+    let ciphertext = BASE64.decode(blob.ciphertext).map_err(|err| err.to_string())?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|err| err.to_string())?;
+    cipher
+        .decrypt(XNonce::from_slice(&nonce), Payload { msg: ciphertext.as_ref(), aad })
+        .map_err(|_| "Decryption failed".to_string())
+}
+
+fn encrypt_json<T: Serialize>(key: &[u8; 32], aad: &[u8], value: &T) -> Result<Vec<u8>, String> {
+    let plaintext = serde_json::to_vec(value).map_err(|err| err.to_string())?;
+    encrypt_bytes(key, aad, &plaintext)
+}
+
+fn decrypt_json<T: for<'de> Deserialize<'de>>(key: &[u8; 32], aad: &[u8], encrypted: &[u8]) -> Result<T, String> {
+    let plaintext = decrypt_bytes(key, aad, encrypted)?;
+    serde_json::from_slice(&plaintext).map_err(|err| err.to_string())
+}
+
+fn current_root_key(state: &tauri::State<AppState>) -> Result<[u8; 32], String> {
+    let guard = state.session.lock().map_err(|_| "Session lock poisoned".to_string())?;
+    guard
+        .as_ref()
+        .map(|session| session.root_key)
+        .ok_or_else(|| "Vault is locked".to_string())
+}
+
+#[tauri::command]
+fn get_status(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+    if state.session.lock().map_err(|_| "Session lock poisoned".to_string())?.is_some() {
+        return Ok(VaultStatus::Unlocked);
+    }
+    if !db_path()?.exists() {
+        return Ok(VaultStatus::NoVault);
+    }
+    let conn = open_db()?;
+    if has_vault(&conn)? {
+        Ok(VaultStatus::Locked)
+    } else {
+        Ok(VaultStatus::NoVault)
+    }
+}
+
+#[tauri::command]
+fn initialize_vault(master_password: String, state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+    if master_password.len() < 8 {
+        return Err("Master password must contain at least 8 characters".to_string());
+    }
+
+    let conn = open_db()?;
+    if has_vault(&conn)? {
+        return Err("A local vault already exists".to_string());
+    }
+
+    let salt = random_bytes::<16>();
+    let mut unlock_key = derive_unlock_key(&master_password, &salt)?;
+    let root_key = random_bytes::<32>();
+    let encrypted_root_key = encrypt_bytes(&unlock_key, b"root-key", &root_key)?;
+    unlock_key.zeroize();
+
+    let now = Utc::now().to_rfc3339();
+    let kdf = KdfParams {
+        alg: "argon2id".to_string(),
+        memory_kib: 19_456,
+        iterations: 2,
+        parallelism: 1,
+    };
+
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["schema_version", "1"],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO keysets (id, kdf_json, salt, encrypted_root_key, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            Uuid::new_v4().to_string(),
+            serde_json::to_string(&kdf).map_err(|err| err.to_string())?,
+            salt.as_slice(),
+            encrypted_root_key,
+            now,
+            now
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+
+    *state.session.lock().map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
+    Ok(VaultStatus::Unlocked)
+}
+
+#[tauri::command]
+fn unlock_vault(master_password: String, state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+    let conn = open_db()?;
+    let (salt, encrypted_root_key): (Vec<u8>, Vec<u8>) = conn
+        .query_row(
+            "SELECT salt, encrypted_root_key FROM keysets ORDER BY created_at LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "No local vault was found".to_string())?;
+    let mut unlock_key = derive_unlock_key(&master_password, &salt)?;
+    let root_key_bytes = decrypt_bytes(&unlock_key, b"root-key", &encrypted_root_key)?;
+    unlock_key.zeroize();
+    if root_key_bytes.len() != 32 {
+        return Err("Root key is invalid".to_string());
+    }
+    let mut root_key = [0_u8; 32];
+    root_key.copy_from_slice(&root_key_bytes);
+    *state.session.lock().map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
+    Ok(VaultStatus::Unlocked)
+}
+
+#[tauri::command]
+fn lock_vault(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+    let mut guard = state.session.lock().map_err(|_| "Session lock poisoned".to_string())?;
+    if let Some(mut session) = guard.take() {
+        session.root_key.zeroize();
+    }
+    Ok(VaultStatus::Locked)
+}
+
+#[tauri::command]
+fn list_items(state: tauri::State<AppState>) -> Result<Vec<ItemOverview>, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, encrypted_overview, favorite FROM items WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, encrypted_overview, favorite) = row.map_err(|err| err.to_string())?;
+        let aad = format!("item-overview:{id}");
+        let mut overview: ItemOverview = decrypt_json(&root_key, aad.as_bytes(), &encrypted_overview)?;
+        overview.favorite = favorite != 0;
+        items.push(overview);
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+fn get_item(id: String, state: tauri::State<AppState>) -> Result<LoginDetails, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let (encrypted_details, favorite): (Vec<u8>, i64) = conn
+        .query_row(
+            "SELECT encrypted_details, favorite FROM items WHERE id = ?1 AND deleted_at IS NULL",
+            params![id.clone()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "Item not found".to_string())?;
+    let aad = format!("item-details:{id}");
+    let mut details: LoginDetails = decrypt_json(&root_key, aad.as_bytes(), &encrypted_details)?;
+    details.favorite = favorite != 0;
+    Ok(details)
+}
+
+#[tauri::command]
+fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<LoginDetails, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let title = if input.title.trim().is_empty() {
+        "未命名登录信息".to_string()
+    } else {
+        input.title.trim().to_string()
+    };
+    let icon_text = title.chars().take(2).collect::<String>();
+    let details = LoginDetails {
+        id: id.clone(),
+        item_type: "login".to_string(),
+        title: title.clone(),
+        username: input.username,
+        password: input.password,
+        website: input.website,
+        notes: input.notes,
+        tags: input.tags,
+        favorite: false,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let overview = ItemOverview {
+        id: id.clone(),
+        item_type: "login".to_string(),
+        title,
+        subtitle: details.username.clone(),
+        website: Some(details.website.clone()),
+        icon_text,
+        favorite: false,
+        updated_at: now.clone(),
+    };
+
+    let overview_aad = format!("item-overview:{id}");
+    let details_aad = format!("item-details:{id}");
+    let encrypted_overview = encrypt_json(&root_key, overview_aad.as_bytes(), &overview)?;
+    let encrypted_details = encrypt_json(&root_key, details_aad.as_bytes(), &details)?;
+
+    conn.execute(
+        "INSERT INTO items (id, item_type, encrypted_overview, encrypted_details, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, "login", encrypted_overview, encrypted_details, now, now],
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(details)
+}
+
+#[tauri::command]
+fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) -> Result<LoginDetails, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let changed = conn
+        .execute(
+            "UPDATE items SET favorite = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            params![if favorite { 1 } else { 0 }, id.clone()],
+        )
+        .map_err(|err| err.to_string())?;
+    if changed == 0 {
+        return Err("Item not found".to_string());
+    }
+
+    let encrypted_details: Vec<u8> = conn
+        .query_row("SELECT encrypted_details FROM items WHERE id = ?1", params![id.clone()], |row| row.get(0))
+        .map_err(|_| "Item not found".to_string())?;
+    let aad = format!("item-details:{id}");
+    let mut details: LoginDetails = decrypt_json(&root_key, aad.as_bytes(), &encrypted_details)?;
+    details.favorite = favorite;
+    Ok(details)
+}
+
+#[tauri::command]
+fn generate_password(options: GeneratedPasswordOptions) -> Result<String, String> {
+    let length = options.length.clamp(8, 64);
+    let letters = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let numbers = b"23456789";
+    let symbols = b"!@#$%^&*_-+=?";
+    let mut alphabet = letters.to_vec();
+    if options.include_numbers {
+        alphabet.extend_from_slice(numbers);
+    }
+    if options.include_symbols {
+        alphabet.extend_from_slice(symbols);
+    }
+
+    let mut rng = rand::thread_rng();
+    let mut password = Vec::with_capacity(length);
+    if options.include_numbers {
+        password.push(*numbers.choose(&mut rng).ok_or_else(|| "Failed to generate password".to_string())?);
+    }
+    if options.include_symbols {
+        password.push(*symbols.choose(&mut rng).ok_or_else(|| "Failed to generate password".to_string())?);
+    }
+    while password.len() < length {
+        let index = rng.gen_range(0..alphabet.len());
+        password.push(alphabet[index]);
+    }
+    password.shuffle(&mut rng);
+    String::from_utf8(password).map_err(|err| err.to_string())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            initialize_vault,
+            unlock_vault,
+            lock_vault,
+            list_items,
+            get_item,
+            create_login,
+            set_item_favorite,
+            generate_password
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running OnePass Local");
+}

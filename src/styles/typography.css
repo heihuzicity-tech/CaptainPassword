@@ -1,0 +1,18 @@
+:root {
+  --type-caption-size: var(--font-size-body-small);
+  --type-caption-weight: var(--font-weight-body);
+  --type-control-size: var(--font-size-body-large);
+  --type-control-weight: var(--font-weight-strong);
+  --type-list-title-size: var(--font-size-body-large);
+  --type-list-title-weight: var(--font-weight-strong);
+  --type-list-subtitle-size: var(--font-size-body-medium);
+  --type-field-label-size: var(--font-size-body-small);
+  --type-field-label-weight: var(--font-weight-body);
+  --type-field-value-size: var(--font-size-body-large);
+  --type-field-value-weight: var(--font-weight-body);
+  --type-heading-modal-size: var(--font-size-heading-large);
+  --type-heading-modal-weight: var(--font-weight-heading);
+  --type-heading-panel-size: var(--font-size-heading-medium);
+  --type-heading-panel-weight: var(--font-weight-heading);
+  --type-password-features: "ss01", "ss02";
+}

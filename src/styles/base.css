@@ -1,0 +1,41 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-family-default);
+  font-size: calc(var(--text-size-base) * 1px);
+  font-feature-settings: "ss01";
+  line-height: var(--text-height);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-family-default);
+  font-size: var(--font-size-body-large);
+  font-weight: var(--font-weight-body);
+  line-height: var(--text-height);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  font-feature-settings: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+strong {
+  font-weight: var(--font-weight-strong);
+}
