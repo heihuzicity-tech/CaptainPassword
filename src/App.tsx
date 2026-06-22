@@ -1,4 +1,22 @@
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type UniqueIdentifier,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
   Archive,
   ArrowLeft,
   BadgeCheck,
@@ -17,6 +35,7 @@ import {
   Gift,
   Grid2X2,
   HeartPulse,
+  GripVertical,
   IdCard,
   KeyRound,
   Landmark,
@@ -51,7 +70,15 @@ import type {
   ReactNode,
 } from 'react';
 import { api } from './api';
-import type { ItemOverview, ItemType, LoginInput, PasswordInput, VaultItem, VaultStatus } from './types';
+import type {
+  EditableItemInput,
+  ItemOverview,
+  ItemType,
+  LoginInput,
+  PasswordInput,
+  VaultItem,
+  VaultStatus,
+} from './types';
 import { startWindowDrag } from './windowDrag';
 
 type Overlay =
@@ -132,6 +159,7 @@ const fallbackLogin: LoginInput = {
   password: 'yUndKy6izwkvT26sRrib',
   website: 'https://example.com',
   websites: ['https://example.com'],
+  website_labels: ['网站'],
   notes: '',
   tags: [],
 };
@@ -143,15 +171,27 @@ const fallbackPassword: PasswordInput = {
   tags: [],
 };
 
+const defaultWebsiteLabel = '网站';
+const websiteLabelOrDefault = (label?: string) => (label?.trim() ? label : defaultWebsiteLabel);
+
 const websitesForLogin = (input: Pick<LoginInput, 'website' | 'websites'>) =>
   input.websites.length > 0 ? input.websites : [input.website];
 
-const websitePatch = (websites: string[]): Pick<LoginInput, 'website' | 'websites'> => {
+const websiteLabelsForLogin = (input: Pick<LoginInput, 'website' | 'websites' | 'website_labels'>) => {
+  const websites = websitesForLogin(input);
+  return websites.map((_, index) => input.website_labels[index] ?? defaultWebsiteLabel);
+};
+
+const websitePatch = (
+  websites: string[],
+  labels?: string[],
+): Pick<LoginInput, 'website' | 'websites' | 'website_labels'> => {
   const nextWebsites = websites.length > 0 ? websites : [''];
   const primaryWebsite = nextWebsites.find((website) => website.trim().length > 0) ?? nextWebsites[0] ?? '';
   return {
     website: primaryWebsite,
     websites: nextWebsites,
+    website_labels: nextWebsites.map((_, index) => labels?.[index] ?? defaultWebsiteLabel),
   };
 };
 
@@ -236,6 +276,14 @@ export function App() {
     setItems((currentItems) =>
       currentItems.map((item) => (item.id === updatedItem.id ? { ...item, favorite: updatedItem.favorite } : item)),
     );
+  };
+
+  const handleItemUpdate = async (id: string, input: EditableItemInput) => {
+    const updatedItem = await api.updateItem(id, input);
+    setSelectedItem(updatedItem);
+    await refreshItems();
+    setSelectedId(updatedItem.id);
+    return updatedItem;
   };
 
   const setPaneWidth = useCallback((pane: ResizablePane, value: number) => {
@@ -340,7 +388,7 @@ export function App() {
             onPointerDown={(event) => beginPaneResize('itemList', event)}
             onKeyDown={(event) => handlePaneResizeKey('itemList', event)}
           />
-          <DetailPane item={selectedItem} onFavoriteChange={handleFavoriteChange} />
+          <DetailPane item={selectedItem} onFavoriteChange={handleFavoriteChange} onItemUpdate={handleItemUpdate} />
         </section>
       </main>
 
@@ -753,15 +801,23 @@ function ItemIcon({ item }: { item: ItemOverview }) {
 function DetailPane({
   item,
   onFavoriteChange,
+  onItemUpdate,
 }: {
   item?: VaultItem;
   onFavoriteChange: (id: string, favorite: boolean) => Promise<void>;
+  onItemUpdate: (id: string, input: EditableItemInput) => Promise<VaultItem>;
 }) {
   const [revealed, setRevealed] = useState(false);
+  const [editing, setEditing] = useState(false);
   const itemWebsites = item?.item_type === 'login' ? item.websites?.length ? item.websites : [item.website] : [];
+  const itemWebsiteLabels =
+    item?.item_type === 'login'
+      ? itemWebsites.map((_, index) => websiteLabelOrDefault(item.website_labels?.[index]))
+      : [];
 
   useEffect(() => {
     setRevealed(false);
+    setEditing(false);
   }, [item?.id]);
 
   if (!item) {
@@ -771,6 +827,19 @@ function DetailPane({
           <Lock size={74} />
         </div>
       </section>
+    );
+  }
+
+  if (editing) {
+    return (
+      <ItemEditPane
+        item={item}
+        onCancel={() => setEditing(false)}
+        onSave={async (input) => {
+          await onItemUpdate(item.id, input);
+          setEditing(false);
+        }}
+      />
     );
   }
 
@@ -797,7 +866,7 @@ function DetailPane({
             <Share size={20} />
             分享
           </button>
-          <button className="detail-action">
+          <button className="detail-action" onClick={() => setEditing(true)}>
             <Edit3 size={20} />
             编辑
           </button>
@@ -824,14 +893,14 @@ function DetailPane({
                 onCopy={() => copyValue(item.password)}
               />
             </div>
-            <section className="detail-section">
-              <span className="field-label">网站</span>
-              {itemWebsites.map((website, index) => (
-                <a key={`${index}-${website}`} href={website} target="_blank" rel="noreferrer">
+            {itemWebsites.map((website, index) => (
+              <section className="detail-section" key={`${index}-${website}`}>
+                <span className="field-label">{itemWebsiteLabels[index] ?? defaultWebsiteLabel}</span>
+                <a href={website} target="_blank" rel="noreferrer">
                   {website}
                 </a>
-              ))}
-            </section>
+              </section>
+            ))}
           </>
         ) : (
           <div className="credential-card">
@@ -867,6 +936,121 @@ function DetailPane({
           <ChevronDown size={18} className="rotate-right" />
           最后编辑 {new Date(item.updated_at).toLocaleString('zh-CN')}
         </button>
+      </div>
+    </section>
+  );
+}
+
+const loginInputFromItem = (item: VaultItem): LoginInput => {
+  if (item.item_type !== 'login') return fallbackLogin;
+  const websites = item.websites?.length ? item.websites : [item.website];
+  return {
+    title: item.title,
+    username: item.username,
+    password: item.password,
+    website: item.website,
+    websites,
+    website_labels: websites.map((_, index) => item.website_labels?.[index] ?? defaultWebsiteLabel),
+    notes: item.notes,
+    tags: item.tags,
+  };
+};
+
+const passwordInputFromItem = (item: VaultItem): PasswordInput => {
+  if (item.item_type !== 'password') return fallbackPassword;
+  return {
+    title: item.title,
+    password: item.password,
+    notes: item.notes,
+    tags: item.tags,
+  };
+};
+
+function ItemEditPane({
+  item,
+  onCancel,
+  onSave,
+}: {
+  item: VaultItem;
+  onCancel: () => void;
+  onSave: (input: EditableItemInput) => Promise<void>;
+}) {
+  const typeConfig = itemTypes.find((entry) => entry.type === item.item_type) ?? itemTypes[0];
+  const isPassword = item.item_type === 'password';
+  const [loginInput, setLoginInput] = useState<LoginInput>(() => loginInputFromItem(item));
+  const [passwordInput, setPasswordInput] = useState<PasswordInput>(() => passwordInputFromItem(item));
+  const [generatorHint, setGeneratorHint] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  useEffect(() => {
+    setLoginInput(loginInputFromItem(item));
+    setPasswordInput(passwordInputFromItem(item));
+    setSaveError('');
+  }, [item]);
+
+  const updateLogin = (patch: Partial<LoginInput>) => setLoginInput((current) => ({ ...current, ...patch }));
+  const updatePassword = (patch: Partial<PasswordInput>) => setPasswordInput((current) => ({ ...current, ...patch }));
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError('');
+    try {
+      await onSave(
+        isPassword
+          ? { item_type: 'password', input: passwordInput }
+          : { item_type: 'login', input: loginInput },
+      );
+    } catch (err) {
+      setSaveError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="detail-pane item-edit-pane">
+      <header className="item-edit-header" data-tauri-drag-region="deep" onMouseDown={startWindowDrag}>
+        <div className="item-edit-actions">
+          <h2>编辑</h2>
+          <button className="edit-cancel-button" disabled={saving} onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary-button edit-save-button" disabled={saving} onClick={save}>
+            {saving ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </header>
+      <div className={`editor-body item-edit-body ${generatorOpen ? 'generator-open' : ''}`}>
+        <div className="editor-elements item-edit-elements">
+          <EditorTitle
+            itemType={item.item_type}
+            icon={typeConfig.icon}
+            value={isPassword ? passwordInput.title : loginInput.title}
+            onChange={(title) => (isPassword ? updatePassword({ title }) : updateLogin({ title }))}
+          />
+          {isPassword ? (
+            <PasswordEditorFields
+              input={passwordInput}
+              generatorHint={generatorHint}
+              generatorOpen={generatorOpen}
+              onGeneratorHintChange={setGeneratorHint}
+              onGeneratorOpenChange={setGeneratorOpen}
+              onChange={updatePassword}
+            />
+          ) : (
+            <LoginEditorFields
+              input={loginInput}
+              generatorHint={generatorHint}
+              generatorOpen={generatorOpen}
+              onGeneratorHintChange={setGeneratorHint}
+              onGeneratorOpenChange={setGeneratorOpen}
+              onChange={updateLogin}
+            />
+          )}
+          {saveError && <div className="editor-error">{saveError}</div>}
+        </div>
       </div>
     </section>
   );
@@ -1105,6 +1289,9 @@ function EditorTitle({
             {customIconUrl ? <img className="large-item-custom-icon" src={customIconUrl} alt="" /> : editorIcon}
           </span>
         </button>
+        <span className="large-item-icon-menu" aria-hidden="true">
+          <ChevronDown size={19} />
+        </span>
         <input
           ref={fileInputRef}
           className="icon-file-input"
@@ -1139,34 +1326,50 @@ function EditableFieldGroup({ children }: { children: ReactNode }) {
 
 function EditableTextField({
   label,
+  labelValue,
   value,
   borderStyle = 'single',
   tone = 'primary',
   actions,
   inputClassName,
+  onLabelChange,
   onChange,
 }: {
   label: string;
+  labelValue?: string;
   value: string;
   borderStyle?: FieldBorderStyle;
   tone?: FieldTone;
   actions?: ReactNode;
   inputClassName?: string;
+  onLabelChange?: (value: string) => void;
   onChange: (value: string) => void;
 }) {
   const fieldId = useId();
+  const currentLabel = labelValue ?? label;
 
   return (
     <div className={`editable-field ${tone} field-${borderStyle} ${actions ? 'with-actions' : ''}`}>
       <div className="editable-field-content">
-        <label className="editable-field-label" htmlFor={fieldId}>
-          {label}
-        </label>
+        {onLabelChange ? (
+          <input
+            className="editable-field-label editable-field-label-input"
+            value={currentLabel}
+            aria-label={`${label}字段名称`}
+            spellCheck={false}
+            onChange={(event) => onLabelChange(event.target.value)}
+          />
+        ) : (
+          <label className="editable-field-label" htmlFor={fieldId}>
+            {label}
+          </label>
+        )}
         <div className="editable-field-value-container">
           <input
             id={fieldId}
             className={`editable-field-value ${inputClassName ?? ''}`}
             value={value}
+            aria-label={onLabelChange ? `${currentLabel || label}值` : undefined}
             onChange={(event) => onChange(event.target.value)}
           />
         </div>
@@ -1212,6 +1415,7 @@ function LoginEditorFields({
       </EditableFieldGroup>
       <WebsiteFields input={input} onChange={onChange} />
       <EditorNotes value={input.notes} onChange={(notes) => onChange({ notes })} />
+      <EditorTags tags={input.tags} onChange={(tags) => onChange({ tags })} />
     </>
   );
 }
@@ -1224,53 +1428,169 @@ function WebsiteFields({
   onChange: (patch: Partial<LoginInput>) => void;
 }) {
   const websites = websitesForLogin(input);
+  const websiteLabels = websiteLabelsForLogin(input);
+  const nextWebsiteRowId = useRef(0);
+  const [rowIds, setRowIds] = useState<string[]>(() =>
+    websites.map(() => `website-row-${nextWebsiteRowId.current++}`),
+  );
+  const sortableIds = useMemo(
+    () => websites.map((_, index) => rowIds[index] ?? `website-row-fallback-${index}`),
+    [rowIds, websites],
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  useEffect(() => {
+    setRowIds((current) => {
+      if (current.length === websites.length) return current;
+      if (current.length > websites.length) return current.slice(0, websites.length);
+      return [
+        ...current,
+        ...Array.from({ length: websites.length - current.length }, () => `website-row-${nextWebsiteRowId.current++}`),
+      ];
+    });
+  }, [websites.length]);
+
   const updateWebsite = (index: number, website: string) => {
     const nextWebsites = websites.map((currentWebsite, currentIndex) =>
       currentIndex === index ? website : currentWebsite,
     );
-    onChange(websitePatch(nextWebsites));
+    onChange(websitePatch(nextWebsites, websiteLabels));
+  };
+  const updateWebsiteLabel = (index: number, label: string) => {
+    const nextLabels = websiteLabels.map((currentLabel, currentIndex) =>
+      currentIndex === index ? label : currentLabel,
+    );
+    onChange(websitePatch(websites, nextLabels));
+  };
+  const reorderWebsite = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+    setRowIds((current) => arrayMove(current, fromIndex, toIndex));
+    onChange(websitePatch(arrayMove(websites, fromIndex, toIndex), arrayMove(websiteLabels, fromIndex, toIndex)));
+  };
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return;
+    const fromIndex = sortableIds.indexOf(String(active.id));
+    const toIndex = sortableIds.indexOf(String(over.id));
+    reorderWebsite(fromIndex, toIndex);
   };
   const addWebsite = () => {
-    onChange(websitePatch([...websites, 'https://example.com']));
+    setRowIds((current) => [...current, `website-row-${nextWebsiteRowId.current++}`]);
+    onChange(websitePatch([...websites, ''], [...websiteLabels, defaultWebsiteLabel]));
   };
   const removeWebsite = (index: number) => {
     if (websites.length === 1) {
-      onChange(websitePatch(['']));
+      onChange(websitePatch([''], [defaultWebsiteLabel]));
       return;
     }
-    onChange(websitePatch(websites.filter((_, currentIndex) => currentIndex !== index)));
+    setRowIds((current) => current.filter((_, currentIndex) => currentIndex !== index));
+    onChange(
+      websitePatch(
+        websites.filter((_, currentIndex) => currentIndex !== index),
+        websiteLabels.filter((_, currentIndex) => currentIndex !== index),
+      ),
+    );
   };
 
   return (
     <div className="website-field-group">
-      {websites.map((website, index) => (
-        <div className="optional-field-row" key={`${index}-${websites.length}`}>
-          <button type="button" className="drag-handle" aria-label="调整网站字段">
-            <MoreVertical />
-          </button>
-          <EditableTextField
-            label="网站"
-            value={website}
-            borderStyle={index === 0 ? 'top' : 'middle'}
-            tone="secondary"
-            onChange={(nextWebsite) => updateWebsite(index, nextWebsite)}
-            actions={
-              <>
-                <button type="button" className="icon-button" aria-label="网站字段选项">
-                  <SlidersHorizontal />
-                </button>
-                <button type="button" className="danger-icon" aria-label="移除网站字段" onClick={() => removeWebsite(index)}>
-                  <MinusCircle />
-                </button>
-              </>
-            }
-          />
-        </div>
-      ))}
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
+          {websites.map((website, index) => (
+            <WebsiteSortableRow
+              key={sortableIds[index]}
+              id={sortableIds[index]}
+              disabled={websites.length < 2}
+              index={index}
+              label={websiteLabels[index] ?? defaultWebsiteLabel}
+              value={website}
+              onLabelChange={(nextLabel) => updateWebsiteLabel(index, nextLabel)}
+              onChange={(nextWebsite) => updateWebsite(index, nextWebsite)}
+              onRemove={() => removeWebsite(index)}
+            />
+          ))}
+        </SortableContext>
+      </DndContext>
       <button type="button" className="add-row" onClick={addWebsite}>
         <Plus />
         添加另一个网站
       </button>
+    </div>
+  );
+}
+
+function WebsiteSortableRow({
+  id,
+  disabled,
+  index,
+  label,
+  value,
+  onLabelChange,
+  onChange,
+  onRemove,
+}: {
+  id: UniqueIdentifier;
+  disabled: boolean;
+  index: number;
+  label: string;
+  value: string;
+  onLabelChange: (value: string) => void;
+  onChange: (value: string) => void;
+  onRemove: () => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id, disabled });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`optional-field-row sortable-field-row ${isDragging ? 'is-dragging' : ''}`}
+      style={style}
+    >
+      <button
+        type="button"
+        className={`drag-handle sort-button ${disabled ? 'is-disabled' : ''}`}
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        aria-label={disabled ? undefined : `拖动网站字段 ${index + 1}`}
+        aria-hidden={disabled || undefined}
+        tabIndex={disabled ? -1 : 0}
+      >
+        <GripVertical />
+      </button>
+      <EditableTextField
+        label="网站"
+        labelValue={label}
+        value={value}
+        borderStyle={index === 0 ? 'top' : 'middle'}
+        tone="secondary"
+        onLabelChange={onLabelChange}
+        onChange={onChange}
+        actions={
+          <>
+            <button type="button" className="icon-button" aria-label="网站字段选项">
+              <SlidersHorizontal />
+            </button>
+            <button type="button" className="danger-icon" aria-label="移除网站字段" onClick={onRemove}>
+              <MinusCircle />
+            </button>
+          </>
+        }
+      />
     </div>
   );
 }
@@ -1304,6 +1624,7 @@ function PasswordEditorFields({
         />
       </EditableFieldGroup>
       <EditorNotes value={input.notes} onChange={(notes) => onChange({ notes })} />
+      <EditorTags tags={input.tags} onChange={(tags) => onChange({ tags })} />
     </>
   );
 }
@@ -1371,6 +1692,7 @@ function EditablePasswordField({
             <input
               id={fieldId}
               className="editable-field-value"
+              type="password"
               value={value}
               spellCheck={false}
               onFocus={showGeneratorHint}
@@ -1412,6 +1734,55 @@ function EditorNotes({ value, onChange }: { value: string; onChange: (value: str
         placeholder="在这里添加关于此项目的备注。"
         onChange={(event) => onChange(event.target.value)}
       />
+    </div>
+  );
+}
+
+function EditorTags({ tags, onChange }: { tags: string[]; onChange: (tags: string[]) => void }) {
+  const [draft, setDraft] = useState('');
+
+  const addTag = () => {
+    const nextTag = draft.trim();
+    if (!nextTag) return;
+    if (!tags.includes(nextTag)) {
+      onChange([...tags, nextTag]);
+    }
+    setDraft('');
+  };
+
+  const removeTag = (tag: string) => {
+    onChange(tags.filter((currentTag) => currentTag !== tag));
+  };
+
+  return (
+    <div className="editor-tag-section">
+      <span className="editor-section-label">标签</span>
+      <div className="editor-tags">
+        {tags.map((tag) => (
+          <button key={tag} type="button" className="editable-tag" onClick={() => removeTag(tag)}>
+            <span>{tag}</span>
+            <X size={15} />
+          </button>
+        ))}
+        <label className="tag-entry">
+          <Plus size={19} />
+          <input
+            value={draft}
+            placeholder="添加标签"
+            onBlur={addTag}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ',') {
+                event.preventDefault();
+                addTag();
+              }
+              if (event.key === 'Backspace' && !draft && tags.length > 0) {
+                onChange(tags.slice(0, -1));
+              }
+            }}
+          />
+        </label>
+      </div>
     </div>
   );
 }

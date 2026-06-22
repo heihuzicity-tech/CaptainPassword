@@ -80,6 +80,8 @@ struct LoginDetails {
     website: String,
     #[serde(default)]
     websites: Vec<String>,
+    #[serde(default)]
+    website_labels: Vec<String>,
     notes: String,
     tags: Vec<String>,
     #[serde(default)]
@@ -110,6 +112,8 @@ struct LoginInput {
     website: String,
     #[serde(default)]
     websites: Vec<String>,
+    #[serde(default)]
+    website_labels: Vec<String>,
     notes: String,
     tags: Vec<String>,
 }
@@ -120,6 +124,13 @@ struct PasswordInput {
     password: String,
     notes: String,
     tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "item_type", content = "input", rename_all = "snake_case")]
+enum ItemUpdateInput {
+    Login(LoginInput),
+    Password(PasswordInput),
 }
 
 #[derive(Deserialize)]
@@ -283,6 +294,14 @@ fn normalize_websites(primary: String, websites: Vec<String>) -> Vec<String> {
         values.push(String::new());
     }
     values
+}
+
+fn normalize_website_labels(mut labels: Vec<String>, len: usize) -> Vec<String> {
+    labels.truncate(len);
+    while labels.len() < len {
+        labels.push("网站".to_string());
+    }
+    labels
 }
 
 fn primary_website(websites: &[String]) -> String {
@@ -453,6 +472,7 @@ fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<Logi
     let title = title_or_default(&input.title, "未命名登录信息");
     let icon_text = icon_text(&title);
     let websites = normalize_websites(input.website, input.websites);
+    let website_labels = normalize_website_labels(input.website_labels, websites.len());
     let website = primary_website(&websites);
     let details = LoginDetails {
         id: id.clone(),
@@ -462,6 +482,7 @@ fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<Logi
         password: input.password,
         website,
         websites,
+        website_labels,
         notes: input.notes,
         tags: input.tags,
         favorite: false,
@@ -538,6 +559,114 @@ fn create_password(input: PasswordInput, state: tauri::State<AppState>) -> Resul
 }
 
 #[tauri::command]
+fn update_item(id: String, input: ItemUpdateInput, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
+    let root_key = current_root_key(&state)?;
+    let conn = open_db()?;
+    let (existing_type, favorite, created_at): (String, i64, String) = conn
+        .query_row(
+            "SELECT item_type, favorite, created_at FROM items WHERE id = ?1 AND deleted_at IS NULL",
+            params![id.clone()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "Item not found".to_string())?;
+
+    let favorite_bool = favorite != 0;
+    let now = Utc::now().to_rfc3339();
+
+    match input {
+        ItemUpdateInput::Login(input) => {
+            if existing_type != "login" {
+                return Err("Item type cannot be changed".to_string());
+            }
+
+            let title = title_or_default(&input.title, "未命名登录信息");
+            let icon_text = icon_text(&title);
+            let websites = normalize_websites(input.website, input.websites);
+            let website_labels = normalize_website_labels(input.website_labels, websites.len());
+            let website = primary_website(&websites);
+            let details = LoginDetails {
+                id: id.clone(),
+                item_type: "login".to_string(),
+                title: title.clone(),
+                username: input.username,
+                password: input.password,
+                website,
+                websites,
+                website_labels,
+                notes: input.notes,
+                tags: input.tags,
+                favorite: favorite_bool,
+                created_at: created_at.clone(),
+                updated_at: now.clone(),
+            };
+            let overview = ItemOverview {
+                id: id.clone(),
+                item_type: "login".to_string(),
+                title,
+                subtitle: details.username.clone(),
+                website: Some(details.website.clone()),
+                icon_text,
+                favorite: favorite_bool,
+                updated_at: now.clone(),
+            };
+            let overview_aad = format!("item-overview:{id}");
+            let details_aad = format!("item-details:{id}");
+            let encrypted_overview = encrypt_json(&root_key, overview_aad.as_bytes(), &overview)?;
+            let encrypted_details = encrypt_json(&root_key, details_aad.as_bytes(), &details)?;
+
+            conn.execute(
+                "UPDATE items SET encrypted_overview = ?1, encrypted_details = ?2, updated_at = ?3, version = version + 1 WHERE id = ?4 AND deleted_at IS NULL",
+                params![encrypted_overview, encrypted_details, now, id],
+            )
+            .map_err(|err| err.to_string())?;
+
+            serde_json::to_value(details).map_err(|err| err.to_string())
+        }
+        ItemUpdateInput::Password(input) => {
+            if existing_type != "password" {
+                return Err("Item type cannot be changed".to_string());
+            }
+
+            let title = title_or_default(&input.title, "未命名密码");
+            let icon_text = icon_text(&title);
+            let details = PasswordDetails {
+                id: id.clone(),
+                item_type: "password".to_string(),
+                title: title.clone(),
+                password: input.password,
+                notes: input.notes,
+                tags: input.tags,
+                favorite: favorite_bool,
+                created_at,
+                updated_at: now.clone(),
+            };
+            let overview = ItemOverview {
+                id: id.clone(),
+                item_type: "password".to_string(),
+                title,
+                subtitle: "密码".to_string(),
+                website: None,
+                icon_text,
+                favorite: favorite_bool,
+                updated_at: now.clone(),
+            };
+            let overview_aad = format!("item-overview:{id}");
+            let details_aad = format!("item-details:{id}");
+            let encrypted_overview = encrypt_json(&root_key, overview_aad.as_bytes(), &overview)?;
+            let encrypted_details = encrypt_json(&root_key, details_aad.as_bytes(), &details)?;
+
+            conn.execute(
+                "UPDATE items SET encrypted_overview = ?1, encrypted_details = ?2, updated_at = ?3, version = version + 1 WHERE id = ?4 AND deleted_at IS NULL",
+                params![encrypted_overview, encrypted_details, now, id],
+            )
+            .map_err(|err| err.to_string())?;
+
+            serde_json::to_value(details).map_err(|err| err.to_string())
+        }
+    }
+}
+
+#[tauri::command]
 fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
@@ -599,6 +728,7 @@ fn main() {
             get_item,
             create_login,
             create_password,
+            update_item,
             set_item_favorite,
             generate_password
         ])

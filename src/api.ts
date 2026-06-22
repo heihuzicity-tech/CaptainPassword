@@ -1,5 +1,6 @@
 import { invoke, isTauri as isTauriRuntime } from '@tauri-apps/api/core';
 import type {
+  EditableItemInput,
   GeneratedPasswordOptions,
   ItemOverview,
   LoginInput,
@@ -19,6 +20,7 @@ type Api = {
   getItem(id: string): Promise<VaultItem>;
   createLogin(input: LoginInput): Promise<LoginItem>;
   createPassword(input: PasswordInput): Promise<PasswordItem>;
+  updateItem(id: string, input: EditableItemInput): Promise<VaultItem>;
   setFavorite(id: string, favorite: boolean): Promise<VaultItem>;
   generatePassword(options: GeneratedPasswordOptions): Promise<string>;
 };
@@ -32,6 +34,7 @@ const demoItems: VaultItem[] = [
     password: 'yUndKy6izwkvT26sRrib',
     website: 'https://app.mintlify.com',
     websites: ['https://app.mintlify.com'],
+    website_labels: ['网站'],
     notes: 'Company name\nheihuzi-ai',
     tags: [],
     favorite: true,
@@ -46,6 +49,7 @@ const demoItems: VaultItem[] = [
     password: '8HTnfpWgFhsskXJNEzrE',
     website: 'https://example.com',
     websites: ['https://example.com'],
+    website_labels: ['网站'],
     notes: '',
     tags: [],
     favorite: false,
@@ -60,6 +64,7 @@ const demoItems: VaultItem[] = [
     password: 'N9wQn3m9rZ',
     website: 'https://platform.openai.com',
     websites: ['https://platform.openai.com'],
+    website_labels: ['网站'],
     notes: '',
     tags: [],
     favorite: false,
@@ -89,6 +94,9 @@ const toOverview = (item: VaultItem): ItemOverview => ({
   favorite: item.favorite,
   updated_at: item.updated_at,
 });
+
+const primaryWebsite = (websites: string[], fallback: string) =>
+  websites.find((website) => website.trim().length > 0) ?? websites[0] ?? fallback;
 
 const randomPassword = (options: GeneratedPasswordOptions) => {
   const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -131,6 +139,7 @@ const browserPreviewApi: Api = {
       password: input.password,
       website: input.website,
       websites: input.websites,
+      website_labels: input.website_labels,
       notes: input.notes,
       tags: input.tags,
       favorite: false,
@@ -156,6 +165,44 @@ const browserPreviewApi: Api = {
     demoItems.unshift(item);
     return item;
   },
+  async updateItem(id: string, update: EditableItemInput) {
+    const index = demoItems.findIndex((entry) => entry.id === id);
+    if (index === -1) throw new Error('Item not found');
+    const current = demoItems[index];
+    if (current.item_type !== update.item_type) throw new Error('Item type cannot be changed');
+
+    const now = new Date().toISOString();
+    const item: VaultItem =
+      update.item_type === 'login'
+        ? {
+            id,
+            item_type: 'login',
+            title: update.input.title || '未命名登录信息',
+            username: update.input.username,
+            password: update.input.password,
+            website: primaryWebsite(update.input.websites, update.input.website),
+            websites: update.input.websites,
+            website_labels: update.input.website_labels,
+            notes: update.input.notes,
+            tags: update.input.tags,
+            favorite: current.favorite,
+            created_at: current.created_at,
+            updated_at: now,
+          }
+        : {
+            id,
+            item_type: 'password',
+            title: update.input.title || '未命名密码',
+            password: update.input.password,
+            notes: update.input.notes,
+            tags: update.input.tags,
+            favorite: current.favorite,
+            created_at: current.created_at,
+            updated_at: now,
+          };
+    demoItems[index] = item;
+    return item;
+  },
   async setFavorite(id: string, favorite: boolean) {
     const item = demoItems.find((entry) => entry.id === id);
     if (!item) throw new Error('Item not found');
@@ -176,6 +223,7 @@ const tauriApi: Api = {
   getItem: (id) => invoke<VaultItem>('get_item', { id }),
   createLogin: (input) => invoke<LoginItem>('create_login', { input }),
   createPassword: (input) => invoke<PasswordItem>('create_password', { input }),
+  updateItem: (id, input) => invoke<VaultItem>('update_item', { id, input }),
   setFavorite: (id, favorite) => invoke<VaultItem>('set_item_favorite', { id, favorite }),
   generatePassword: (options) => invoke<string>('generate_password', { options }),
 };

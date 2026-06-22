@@ -21,6 +21,7 @@ export type LoginItem = {
   password: string;
   website: string;
   websites?: string[];
+  website_labels?: string[];
   notes: string;
   tags: string[];
   favorite: boolean;
@@ -48,6 +49,7 @@ export type LoginInput = {
   password: string;
   website: string;
   websites: string[];
+  website_labels: string[];
   notes: string;
   tags: string[];
 };
@@ -58,6 +60,10 @@ export type PasswordInput = {
   notes: string;
   tags: string[];
 };
+
+export type EditableItemInput =
+  | { item_type: 'login'; input: LoginInput }
+  | { item_type: 'password'; input: PasswordInput };
 
 export type GeneratedPasswordOptions = {
   length: number;
