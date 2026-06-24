@@ -18,8 +18,39 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body="$(cat <<'BODY'
+          CaptainPassword desktop builds for Windows x64, macOS Apple Silicon, and macOS Intel.
+
+          macOS builds are ad-hoc signed to keep the app bundle structurally valid, but they are not notarized yet. macOS may still show a security warning until Developer ID signing and notarization are configured.
+          BODY
+          )"
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "船长密码箱 ${RELEASE_TAG}" \
+              --notes "${body}" \
+              --latest
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "船长密码箱 ${RELEASE_TAG}" \
+              --notes "${body}" \
+              --latest
+          fi
+
   build-release:
     name: Build ${{ matrix.name }}
+    needs: create-release
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
@@ -28,18 +59,21 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             rust-target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles dmg
+            args: --target aarch64-apple-darwin --bundles app
             asset-suffix: macOS-AppleSilicon
+            bundle-kind: macos
           - name: macOS Intel
             platform: macos-latest
             rust-target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles dmg
+            args: --target x86_64-apple-darwin --bundles app
             asset-suffix: macOS-Intel
+            bundle-kind: macos
           - name: Windows x64
             platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: --bundles nsis
             asset-suffix: Windows-x64-Setup
+            bundle-kind: windows
 
     steps:
       - name: Checkout
@@ -66,7 +100,22 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and upload Tauri bundle
+      - name: Build macOS app bundle
+        if: matrix.bundle-kind == 'macos'
+        run: npm run tauri -- build ${{ matrix.args }} --ci
+
+      - name: Package and upload macOS DMG
+        if: matrix.bundle-kind == 'macos'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-macos-dmg.sh
+          dmg_path="$(scripts/package-macos-dmg.sh "${{ matrix.rust-target }}" "${{ matrix.asset-suffix }}" | tail -n 1)"
+          gh release upload "${RELEASE_TAG}" "${dmg_path}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Build Windows NSIS bundle
+        if: matrix.bundle-kind == 'windows'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,7 +125,7 @@ jobs:
           releaseBody: |
             CaptainPassword desktop builds for Windows x64, macOS Apple Silicon, and macOS Intel.
 
-            Unsigned preview build. macOS may show a security warning until code signing and notarization are configured.
+            macOS builds are ad-hoc signed to keep the app bundle structurally valid, but they are not notarized yet. macOS may still show a security warning until Developer ID signing and notarization are configured.
           releaseDraft: false
           prerelease: false
           assetNamePattern: CaptainPassword-v[version]-${{ matrix.asset-suffix }}[ext]
