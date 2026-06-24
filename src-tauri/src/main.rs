@@ -1,20 +1,18 @@
-use std::{
-    fs,
-    path::PathBuf,
-    sync::Mutex,
-};
+use std::{fs, path::PathBuf, sync::Mutex};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, OsRng, Payload},
     aead::rand_core::RngCore,
+    aead::{Aead, KeyInit, OsRng, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use chrono::Utc;
 use rand::{seq::SliceRandom, Rng};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -140,13 +138,102 @@ struct GeneratedPasswordOptions {
     include_symbols: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct ShortcutPreference {
+    accelerator: String,
+    keys: Vec<String>,
+}
+
 fn data_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir().ok_or_else(|| "Unable to resolve local data directory".to_string())?;
-    Ok(base.join("OnePass Local"))
+    let base = dirs::data_local_dir()
+        .ok_or_else(|| "Unable to resolve local data directory".to_string())?;
+    let current = base.join("CaptainPassword");
+    let legacy = base.join("OnePass Local");
+
+    let current_has_data = current.join("captain-password.sqlite").exists()
+        || current.join("preferences.json").exists();
+    let legacy_has_data =
+        legacy.join("onepass.sqlite").exists() || legacy.join("preferences.json").exists();
+
+    if current_has_data || (current.exists() && !legacy_has_data) {
+        return Ok(current);
+    }
+    if legacy_has_data {
+        return Ok(legacy);
+    }
+    Ok(current)
 }
 
 fn db_path() -> Result<PathBuf, String> {
-    Ok(data_dir()?.join("onepass.sqlite"))
+    let dir = data_dir()?;
+    let current = dir.join("captain-password.sqlite");
+    if current.exists() {
+        return Ok(current);
+    }
+    let legacy = dir.join("onepass.sqlite");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(current)
+}
+
+fn preferences_path() -> Result<PathBuf, String> {
+    Ok(data_dir()?.join("preferences.json"))
+}
+
+fn default_quick_access_shortcut() -> ShortcutPreference {
+    if cfg!(target_os = "macos") {
+        ShortcutPreference {
+            accelerator: "Command+Alt+K".to_string(),
+            keys: vec!["⌥".to_string(), "⌘".to_string(), "K".to_string()],
+        }
+    } else {
+        ShortcutPreference {
+            accelerator: "Control+Alt+K".to_string(),
+            keys: vec!["Ctrl".to_string(), "Alt".to_string(), "K".to_string()],
+        }
+    }
+}
+
+fn read_quick_access_shortcut() -> ShortcutPreference {
+    let Ok(path) = preferences_path() else {
+        return default_quick_access_shortcut();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return default_quick_access_shortcut();
+    };
+    serde_json::from_str::<ShortcutPreference>(&content)
+        .unwrap_or_else(|_| default_quick_access_shortcut())
+}
+
+fn write_quick_access_shortcut(shortcut: &ShortcutPreference) -> Result<(), String> {
+    let dir = data_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let content = serde_json::to_string_pretty(shortcut).map_err(|err| err.to_string())?;
+    fs::write(preferences_path()?, content).map_err(|err| err.to_string())
+}
+
+fn show_quick_search<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("quick-search") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn register_quick_access_shortcut<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    shortcut: &ShortcutPreference,
+) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|err| err.to_string())?;
+    app.global_shortcut()
+        .on_shortcut(shortcut.accelerator.as_str(), |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                show_quick_search(app);
+            }
+        })
+        .map_err(|err| err.to_string())
 }
 
 fn open_db() -> Result<Connection, String> {
@@ -199,8 +286,11 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|err| err.to_string())?;
     if has_favorite_column == 0 {
-        conn.execute("ALTER TABLE items ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|err| err.to_string())?;
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|err| err.to_string())?;
     }
 
     Ok(())
@@ -233,7 +323,13 @@ fn encrypt_bytes(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>
     let nonce = random_bytes::<24>();
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|err| err.to_string())?;
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|err| err.to_string())?;
     let blob = CipherBlob {
         v: 1,
@@ -250,10 +346,18 @@ fn decrypt_bytes(key: &[u8; 32], aad: &[u8], encrypted: &[u8]) -> Result<Vec<u8>
         return Err("Unsupported encrypted blob".to_string());
     }
     let nonce = BASE64.decode(blob.nonce).map_err(|err| err.to_string())?;
-    let ciphertext = BASE64.decode(blob.ciphertext).map_err(|err| err.to_string())?;
+    let ciphertext = BASE64
+        .decode(blob.ciphertext)
+        .map_err(|err| err.to_string())?;
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|err| err.to_string())?;
     cipher
-        .decrypt(XNonce::from_slice(&nonce), Payload { msg: ciphertext.as_ref(), aad })
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: ciphertext.as_ref(),
+                aad,
+            },
+        )
         .map_err(|_| "Decryption failed".to_string())
 }
 
@@ -262,13 +366,20 @@ fn encrypt_json<T: Serialize>(key: &[u8; 32], aad: &[u8], value: &T) -> Result<V
     encrypt_bytes(key, aad, &plaintext)
 }
 
-fn decrypt_json<T: for<'de> Deserialize<'de>>(key: &[u8; 32], aad: &[u8], encrypted: &[u8]) -> Result<T, String> {
+fn decrypt_json<T: for<'de> Deserialize<'de>>(
+    key: &[u8; 32],
+    aad: &[u8],
+    encrypted: &[u8],
+) -> Result<T, String> {
     let plaintext = decrypt_bytes(key, aad, encrypted)?;
     serde_json::from_slice(&plaintext).map_err(|err| err.to_string())
 }
 
 fn current_root_key(state: &tauri::State<AppState>) -> Result<[u8; 32], String> {
-    let guard = state.session.lock().map_err(|_| "Session lock poisoned".to_string())?;
+    let guard = state
+        .session
+        .lock()
+        .map_err(|_| "Session lock poisoned".to_string())?;
     guard
         .as_ref()
         .map(|session| session.root_key)
@@ -289,7 +400,11 @@ fn icon_text(title: &str) -> String {
 }
 
 fn normalize_websites(primary: String, websites: Vec<String>) -> Vec<String> {
-    let mut values = if websites.is_empty() { vec![primary] } else { websites };
+    let mut values = if websites.is_empty() {
+        vec![primary]
+    } else {
+        websites
+    };
     if values.is_empty() {
         values.push(String::new());
     }
@@ -329,7 +444,12 @@ fn details_value_with_favorite(
 
 #[tauri::command]
 fn get_status(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
-    if state.session.lock().map_err(|_| "Session lock poisoned".to_string())?.is_some() {
+    if state
+        .session
+        .lock()
+        .map_err(|_| "Session lock poisoned".to_string())?
+        .is_some()
+    {
         return Ok(VaultStatus::Unlocked);
     }
     if !db_path()?.exists() {
@@ -344,7 +464,10 @@ fn get_status(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
 }
 
 #[tauri::command]
-fn initialize_vault(master_password: String, state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+fn initialize_vault(
+    master_password: String,
+    state: tauri::State<AppState>,
+) -> Result<VaultStatus, String> {
     if master_password.len() < 8 {
         return Err("Master password must contain at least 8 characters".to_string());
     }
@@ -386,12 +509,18 @@ fn initialize_vault(master_password: String, state: tauri::State<AppState>) -> R
     )
     .map_err(|err| err.to_string())?;
 
-    *state.session.lock().map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
+    *state
+        .session
+        .lock()
+        .map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
     Ok(VaultStatus::Unlocked)
 }
 
 #[tauri::command]
-fn unlock_vault(master_password: String, state: tauri::State<AppState>) -> Result<VaultStatus, String> {
+fn unlock_vault(
+    master_password: String,
+    state: tauri::State<AppState>,
+) -> Result<VaultStatus, String> {
     let conn = open_db()?;
     let (salt, encrypted_root_key): (Vec<u8>, Vec<u8>) = conn
         .query_row(
@@ -408,13 +537,19 @@ fn unlock_vault(master_password: String, state: tauri::State<AppState>) -> Resul
     }
     let mut root_key = [0_u8; 32];
     root_key.copy_from_slice(&root_key_bytes);
-    *state.session.lock().map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
+    *state
+        .session
+        .lock()
+        .map_err(|_| "Session lock poisoned".to_string())? = Some(Session { root_key });
     Ok(VaultStatus::Unlocked)
 }
 
 #[tauri::command]
 fn lock_vault(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
-    let mut guard = state.session.lock().map_err(|_| "Session lock poisoned".to_string())?;
+    let mut guard = state
+        .session
+        .lock()
+        .map_err(|_| "Session lock poisoned".to_string())?;
     if let Some(mut session) = guard.take() {
         session.root_key.zeroize();
     }
@@ -442,7 +577,8 @@ fn list_items(state: tauri::State<AppState>) -> Result<Vec<ItemOverview>, String
     for row in rows {
         let (id, encrypted_overview, favorite) = row.map_err(|err| err.to_string())?;
         let aad = format!("item-overview:{id}");
-        let mut overview: ItemOverview = decrypt_json(&root_key, aad.as_bytes(), &encrypted_overview)?;
+        let mut overview: ItemOverview =
+            decrypt_json(&root_key, aad.as_bytes(), &encrypted_overview)?;
         overview.favorite = favorite != 0;
         items.push(overview);
     }
@@ -515,7 +651,10 @@ fn create_login(input: LoginInput, state: tauri::State<AppState>) -> Result<Logi
 }
 
 #[tauri::command]
-fn create_password(input: PasswordInput, state: tauri::State<AppState>) -> Result<PasswordDetails, String> {
+fn create_password(
+    input: PasswordInput,
+    state: tauri::State<AppState>,
+) -> Result<PasswordDetails, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
     let id = Uuid::new_v4().to_string();
@@ -559,7 +698,11 @@ fn create_password(input: PasswordInput, state: tauri::State<AppState>) -> Resul
 }
 
 #[tauri::command]
-fn update_item(id: String, input: ItemUpdateInput, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
+fn update_item(
+    id: String,
+    input: ItemUpdateInput,
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
     let (existing_type, favorite, created_at): (String, i64, String) = conn
@@ -667,7 +810,11 @@ fn update_item(id: String, input: ItemUpdateInput, state: tauri::State<AppState>
 }
 
 #[tauri::command]
-fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
+fn set_item_favorite(
+    id: String,
+    favorite: bool,
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
     let root_key = current_root_key(&state)?;
     let conn = open_db()?;
     let changed = conn
@@ -681,7 +828,11 @@ fn set_item_favorite(id: String, favorite: bool, state: tauri::State<AppState>) 
     }
 
     let encrypted_details: Vec<u8> = conn
-        .query_row("SELECT encrypted_details FROM items WHERE id = ?1", params![id.clone()], |row| row.get(0))
+        .query_row(
+            "SELECT encrypted_details FROM items WHERE id = ?1",
+            params![id.clone()],
+            |row| row.get(0),
+        )
         .map_err(|_| "Item not found".to_string())?;
     details_value_with_favorite(&root_key, &id, &encrypted_details, favorite)
 }
@@ -703,10 +854,18 @@ fn generate_password(options: GeneratedPasswordOptions) -> Result<String, String
     let mut rng = rand::thread_rng();
     let mut password = Vec::with_capacity(length);
     if options.include_numbers {
-        password.push(*numbers.choose(&mut rng).ok_or_else(|| "Failed to generate password".to_string())?);
+        password.push(
+            *numbers
+                .choose(&mut rng)
+                .ok_or_else(|| "Failed to generate password".to_string())?,
+        );
     }
     if options.include_symbols {
-        password.push(*symbols.choose(&mut rng).ok_or_else(|| "Failed to generate password".to_string())?);
+        password.push(
+            *symbols
+                .choose(&mut rng)
+                .ok_or_else(|| "Failed to generate password".to_string())?,
+        );
     }
     while password.len() < length {
         let index = rng.gen_range(0..alphabet.len());
@@ -722,9 +881,38 @@ fn copy_text(value: String) -> Result<(), String> {
     clipboard.set_text(value).map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+fn get_quick_access_shortcut() -> ShortcutPreference {
+    read_quick_access_shortcut()
+}
+
+#[tauri::command]
+fn set_quick_access_shortcut<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    shortcut: ShortcutPreference,
+) -> Result<ShortcutPreference, String> {
+    let previous_shortcut = read_quick_access_shortcut();
+    if let Err(err) = register_quick_access_shortcut(&app, &shortcut) {
+        let _ = register_quick_access_shortcut(&app, &previous_shortcut);
+        return Err(err);
+    }
+    write_quick_access_shortcut(&shortcut)?;
+    Ok(shortcut)
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            app.handle()
+                .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+                .map_err(|err| Box::<dyn std::error::Error>::from(err.to_string()))?;
+            let shortcut = read_quick_access_shortcut();
+            if let Err(err) = register_quick_access_shortcut(app.handle(), &shortcut) {
+                eprintln!("Failed to register quick access shortcut: {err}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             initialize_vault,
@@ -737,8 +925,10 @@ fn main() {
             update_item,
             set_item_favorite,
             generate_password,
-            copy_text
+            copy_text,
+            get_quick_access_shortcut,
+            set_quick_access_shortcut
         ])
         .run(tauri::generate_context!())
-        .expect("error while running 船长密码箱");
+        .expect("error while running CaptainPassword");
 }

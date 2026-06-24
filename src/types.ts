@@ -70,3 +70,8 @@ export type GeneratedPasswordOptions = {
   include_numbers: boolean;
   include_symbols: boolean;
 };
+
+export type QuickAccessShortcut = {
+  accelerator: string;
+  keys: string[];
+};

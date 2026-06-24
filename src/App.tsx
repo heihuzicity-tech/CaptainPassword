@@ -55,6 +55,7 @@ import {
   RefreshCw,
   Search,
   Server,
+  Settings,
   Share,
   ShieldCheck,
   SlidersHorizontal,
@@ -82,6 +83,7 @@ import type {
   ItemType,
   LoginInput,
   PasswordInput,
+  QuickAccessShortcut,
   VaultItem,
   VaultStatus,
 } from './types';
@@ -90,7 +92,8 @@ import { startWindowDrag } from './windowDrag';
 type Overlay =
   | { kind: 'none' }
   | { kind: 'type-picker' }
-  | { kind: 'editor'; itemType: ItemType };
+  | { kind: 'editor'; itemType: ItemType }
+  | { kind: 'settings' };
 type SidebarView = 'all' | 'favorites';
 type CategoryFilter = 'all' | ItemType;
 type ResizablePane = 'sidebar' | 'itemList';
@@ -105,6 +108,11 @@ type QuickCopyField = {
   secret?: boolean;
   primary?: boolean;
 };
+type ShortcutConfig = QuickAccessShortcut;
+type ShortcutKeyEvent = Pick<
+  KeyboardEvent,
+  'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'preventDefault' | 'shiftKey' | 'stopPropagation'
+>;
 
 const APP_NAME = '船长密码箱';
 const QUICK_WINDOW_LABEL = 'quick-search';
@@ -114,6 +122,51 @@ const itemListWidthLimits = { min: 300, max: 520, default: 354 };
 const passwordLengthLimits = { min: 8, max: 40, default: 8 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const isMacPlatform = () => navigator.platform.toLowerCase().includes('mac');
+const defaultQuickAccessShortcut = (): ShortcutConfig =>
+  isMacPlatform()
+    ? { accelerator: 'Command+Alt+K', keys: ['⌥', '⌘', 'K'] }
+    : { accelerator: 'Control+Alt+K', keys: ['Ctrl', 'Alt', 'K'] };
+const keyboardShortcutKey = (key: string) => {
+  if (key === ' ' || key === 'Spacebar') return { accelerator: 'Space', display: 'Space' };
+  if (key.length === 1) return { accelerator: key.toUpperCase(), display: key.toUpperCase() };
+  const keyMap: Record<string, { accelerator: string; display: string }> = {
+    ArrowDown: { accelerator: 'ArrowDown', display: '↓' },
+    ArrowLeft: { accelerator: 'ArrowLeft', display: '←' },
+    ArrowRight: { accelerator: 'ArrowRight', display: '→' },
+    ArrowUp: { accelerator: 'ArrowUp', display: '↑' },
+    Backspace: { accelerator: 'Backspace', display: 'Backspace' },
+    Delete: { accelerator: 'Delete', display: 'Delete' },
+    Enter: { accelerator: 'Enter', display: 'Enter' },
+    Escape: { accelerator: 'Escape', display: 'Esc' },
+    Tab: { accelerator: 'Tab', display: 'Tab' },
+  };
+  return keyMap[key] ?? { accelerator: key, display: key };
+};
+const shortcutFromKeyboardEvent = (event: ShortcutKeyEvent): { shortcut?: ShortcutConfig; error?: string } => {
+  const modifierOnly = ['Alt', 'Control', 'Meta', 'Shift'].includes(event.key);
+  if (modifierOnly) return { error: '请同时按下修饰键和一个普通键。' };
+
+  const mac = isMacPlatform();
+  const modifiers = [
+    { active: event.ctrlKey, accelerator: 'Control', display: mac ? '⌃' : 'Ctrl' },
+    { active: event.altKey, accelerator: 'Alt', display: mac ? '⌥' : 'Alt' },
+    { active: event.shiftKey, accelerator: 'Shift', display: mac ? '⇧' : 'Shift' },
+    { active: event.metaKey, accelerator: 'Command', display: mac ? '⌘' : 'Win' },
+  ].filter((modifier) => modifier.active);
+
+  if (modifiers.length < 2) return { error: '请至少使用两个修饰键，避免和应用内快捷键冲突。' };
+
+  const key = keyboardShortcutKey(event.key);
+  if (!key.accelerator) return { error: '这个按键不能作为快捷键。' };
+
+  return {
+    shortcut: {
+      accelerator: [...modifiers.map((modifier) => modifier.accelerator), key.accelerator].join('+'),
+      keys: [...modifiers.map((modifier) => modifier.display), key.display],
+    },
+  };
+};
 const currentWindowMode = (): AppWindowMode => {
   if (window.location.search.includes(`window=${QUICK_WINDOW_LABEL}`)) return QUICK_WINDOW_LABEL;
   if (!isTauri()) return 'main';
@@ -207,10 +260,10 @@ const memorablePasswordWords = [
 
 const fallbackLogin: LoginInput = {
   title: '',
-  username: 'vim27@qq.com',
-  password: 'yUndKy6izwkvT26sRrib',
-  website: 'https://example.com',
-  websites: ['https://example.com'],
+  username: '',
+  password: '',
+  website: '',
+  websites: [''],
   website_labels: ['网站'],
   notes: '',
   tags: [],
@@ -218,7 +271,7 @@ const fallbackLogin: LoginInput = {
 
 const fallbackPassword: PasswordInput = {
   title: '',
-  password: 'yUndKy6izwkvT26sRrib',
+  password: '',
   notes: '',
   tags: [],
 };
@@ -413,6 +466,7 @@ function MainApp() {
             selectedView={sidebarView}
             onViewChange={setSidebarView}
             onToggleSidebar={() => setSidebarCollapsed(true)}
+            onOpenSettings={() => setOverlay({ kind: 'settings' })}
             onLock={handleLock}
           />
           <PaneResizer
@@ -481,6 +535,8 @@ function MainApp() {
           }}
         />
       )}
+
+      {overlay.kind === 'settings' && <SettingsModal onClose={() => setOverlay({ kind: 'none' })} />}
     </div>
   );
 }
@@ -1003,11 +1059,13 @@ function Sidebar({
   selectedView,
   onViewChange,
   onToggleSidebar,
+  onOpenSettings,
   onLock,
 }: {
   selectedView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   onToggleSidebar: () => void;
+  onOpenSettings: () => void;
   onLock: () => void;
 }) {
   return (
@@ -1031,6 +1089,10 @@ function Sidebar({
         />
       </nav>
       <div className="sidebar-footer">
+        <button className="sidebar-button compact" onClick={onOpenSettings}>
+          <Settings size={17} />
+          <span>设置</span>
+        </button>
         <button className="sidebar-button compact" onClick={onLock}>
           <LogOut size={17} />
           <span>锁定</span>
@@ -1544,6 +1606,172 @@ function FieldLine({
       <button className="field-copy" onClick={onAction}>
         {actionLabel}
       </button>
+    </div>
+  );
+}
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [savedShortcut, setSavedShortcut] = useState<ShortcutConfig>(() => defaultQuickAccessShortcut());
+  const [draftShortcut, setDraftShortcut] = useState<ShortcutConfig>(() => defaultQuickAccessShortcut());
+  const [recording, setRecording] = useState(false);
+  const [shortcutMessage, setShortcutMessage] = useState('');
+  const [savingShortcut, setSavingShortcut] = useState(false);
+  const recorderRef = useRef<HTMLButtonElement>(null);
+  const shortcutChanged = draftShortcut.accelerator !== savedShortcut.accelerator;
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getQuickAccessShortcut()
+      .then((shortcut) => {
+        if (cancelled) return;
+        setSavedShortcut(shortcut);
+        setDraftShortcut(shortcut);
+      })
+      .catch((err) => {
+        if (!cancelled) setShortcutMessage(`读取快捷键失败：${String(err)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const beginRecording = () => {
+    setRecording(true);
+    setShortcutMessage('请直接按下新的快捷键组合。');
+    window.setTimeout(() => recorderRef.current?.focus(), 0);
+  };
+
+  const saveShortcut = async () => {
+    setSavingShortcut(true);
+    setShortcutMessage('');
+    try {
+      const shortcut = await api.setQuickAccessShortcut(draftShortcut);
+      setSavedShortcut(shortcut);
+      setDraftShortcut(shortcut);
+      setShortcutMessage('已保存，快捷键已生效。');
+    } catch (err) {
+      setShortcutMessage(`保存失败：${String(err)}。可能已被其他应用占用。`);
+    } finally {
+      setSavingShortcut(false);
+    }
+  };
+
+  const resetShortcut = async () => {
+    const nextShortcut = defaultQuickAccessShortcut();
+    setSavingShortcut(true);
+    setRecording(false);
+    setShortcutMessage('');
+    try {
+      const shortcut = await api.setQuickAccessShortcut(nextShortcut);
+      setSavedShortcut(shortcut);
+      setDraftShortcut(shortcut);
+      setShortcutMessage('已恢复默认快捷键，并已生效。');
+    } catch (err) {
+      setShortcutMessage(`恢复失败：${String(err)}。可能已被其他应用占用。`);
+    } finally {
+      setSavingShortcut(false);
+    }
+  };
+
+  const handleShortcutKeyEvent = useCallback(
+    (event: ShortcutKeyEvent) => {
+      if (!recording) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (event.key === 'Escape') {
+        setRecording(false);
+        setDraftShortcut(savedShortcut);
+        setShortcutMessage('已取消录入。');
+        return;
+      }
+
+      const { shortcut, error } = shortcutFromKeyboardEvent(event);
+      if (error) {
+        setShortcutMessage(error);
+        return;
+      }
+      if (!shortcut) return;
+
+      setDraftShortcut(shortcut);
+      setRecording(false);
+      setShortcutMessage('已录入，保存后生效。');
+    },
+    [recording, savedShortcut],
+  );
+
+  useEffect(() => {
+    if (!recording) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => handleShortcutKeyEvent(event);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [handleShortcutKeyEvent, recording]);
+
+  return (
+    <div className="overlay">
+      <div className="settings-modal modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header className="settings-header">
+          <div>
+            <h2 id="settings-title">设置</h2>
+            <p>管理 {APP_NAME} 的本地偏好。</p>
+          </div>
+          <button className="icon-button" aria-label="关闭设置" onClick={onClose}>
+            <X />
+          </button>
+        </header>
+
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="设置栏目">
+            <button className="settings-nav-item selected">
+              <Command size={18} />
+              <span>快捷键</span>
+            </button>
+          </nav>
+
+          <section className="settings-panel" aria-labelledby="shortcut-settings-title">
+            <div className="settings-panel-heading">
+              <h3 id="shortcut-settings-title">快捷键</h3>
+              <p>快速唤醒迷你查询窗口，减少在登录页面和主窗口之间来回切换。</p>
+            </div>
+
+            <div className="shortcut-list">
+              <div className="shortcut-row">
+                <div className="shortcut-copy">
+                  <strong>打开迷你查询</strong>
+                  <span>在任意应用前台唤醒迷你查询窗口。</span>
+                </div>
+                <div className="shortcut-editor">
+                  <button
+                    ref={recorderRef}
+                    type="button"
+                    className={`shortcut-recorder ${recording ? 'recording' : ''}`}
+                    aria-label="录入打开迷你查询快捷键"
+                    aria-pressed={recording}
+                    onClick={beginRecording}
+                  >
+                    <span className="shortcut-keys" aria-label={`快捷键 ${draftShortcut.keys.join(' ')}`}>
+                      {draftShortcut.keys.map((key) => (
+                        <kbd key={key}>{key}</kbd>
+                      ))}
+                    </span>
+                    <span className="shortcut-recorder-text">{recording ? '按下组合键' : '修改'}</span>
+                  </button>
+                  <div className="shortcut-actions">
+                    <button className="secondary-button" disabled={!shortcutChanged || savingShortcut} onClick={() => void saveShortcut()}>
+                      {savingShortcut ? '保存中' : '保存'}
+                    </button>
+                    <button className="plain-button" disabled={savingShortcut} onClick={() => void resetShortcut()}>
+                      恢复默认
+                    </button>
+                  </div>
+                  {shortcutMessage && <span className="shortcut-message">{shortcutMessage}</span>}
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

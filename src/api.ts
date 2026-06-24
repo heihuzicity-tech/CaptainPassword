@@ -7,6 +7,7 @@ import type {
   LoginItem,
   PasswordInput,
   PasswordItem,
+  QuickAccessShortcut,
   VaultItem,
   VaultStatus,
 } from './types';
@@ -24,6 +25,8 @@ type Api = {
   setFavorite(id: string, favorite: boolean): Promise<VaultItem>;
   generatePassword(options: GeneratedPasswordOptions): Promise<string>;
   copyText(value: string): Promise<void>;
+  getQuickAccessShortcut(): Promise<QuickAccessShortcut>;
+  setQuickAccessShortcut(shortcut: QuickAccessShortcut): Promise<QuickAccessShortcut>;
 };
 
 const demoItems: VaultItem[] = [
@@ -31,12 +34,12 @@ const demoItems: VaultItem[] = [
     id: 'demo-mintlify',
     item_type: 'login',
     title: 'Mintlify',
-    username: 'heihuzicity@gmail.com',
-    password: 'yUndKy6izwkvT26sRrib',
-    website: 'https://app.mintlify.com',
-    websites: ['https://app.mintlify.com'],
+    username: 'captain@example.com',
+    password: 'DemoPassword-123',
+    website: 'https://example.com',
+    websites: ['https://example.com'],
     website_labels: ['网站'],
-    notes: 'Company name\nheihuzi-ai',
+    notes: '演示条目，仅用于浏览器预览。',
     tags: [],
     favorite: true,
     created_at: new Date().toISOString(),
@@ -46,8 +49,8 @@ const demoItems: VaultItem[] = [
     id: 'demo-fastreal',
     item_type: 'login',
     title: 'FastReal',
-    username: 'vim27@qq.com',
-    password: '8HTnfpWgFhsskXJNEzrE',
+    username: 'demo@example.com',
+    password: 'DemoPassword-456',
     website: 'https://example.com',
     websites: ['https://example.com'],
     website_labels: ['网站'],
@@ -61,10 +64,10 @@ const demoItems: VaultItem[] = [
     id: 'demo-openai',
     item_type: 'login',
     title: 'OpenAI',
-    username: 'vim27@qq.com',
-    password: 'N9wQn3m9rZ',
-    website: 'https://platform.openai.com',
-    websites: ['https://platform.openai.com'],
+    username: 'demo@example.com',
+    password: 'DemoPassword-789',
+    website: 'https://example.com',
+    websites: ['https://example.com'],
     website_labels: ['网站'],
     notes: '',
     tags: [],
@@ -76,7 +79,7 @@ const demoItems: VaultItem[] = [
     id: 'demo-wifi-password',
     item_type: 'password',
     title: 'WiFi 密码',
-    password: '8HTnfpWgFhsskXJNEzrE',
+    password: 'DemoPassword-WiFi',
     notes: '本地演示用的独立密码项目。',
     tags: [],
     favorite: false,
@@ -107,6 +110,26 @@ const randomPassword = (options: GeneratedPasswordOptions) => {
   const bytes = new Uint32Array(options.length);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join('');
+};
+
+const quickAccessShortcutStorageKey = 'captain.quickAccessShortcut';
+const defaultQuickAccessShortcut = (): QuickAccessShortcut =>
+  navigator.platform.toLowerCase().includes('mac')
+    ? { accelerator: 'Command+Alt+K', keys: ['⌥', '⌘', 'K'] }
+    : { accelerator: 'Control+Alt+K', keys: ['Ctrl', 'Alt', 'K'] };
+
+const readBrowserQuickAccessShortcut = () => {
+  try {
+    const saved = localStorage.getItem(quickAccessShortcutStorageKey);
+    if (!saved) return defaultQuickAccessShortcut();
+    const parsed = JSON.parse(saved) as Partial<QuickAccessShortcut>;
+    if (!parsed.accelerator || !Array.isArray(parsed.keys) || parsed.keys.length < 2) {
+      return defaultQuickAccessShortcut();
+    }
+    return { accelerator: parsed.accelerator, keys: parsed.keys };
+  } catch {
+    return defaultQuickAccessShortcut();
+  }
 };
 
 const browserPreviewApi: Api = {
@@ -234,6 +257,13 @@ const browserPreviewApi: Api = {
     textarea.remove();
     if (!copied) throw new Error('Clipboard copy was rejected');
   },
+  async getQuickAccessShortcut() {
+    return readBrowserQuickAccessShortcut();
+  },
+  async setQuickAccessShortcut(shortcut: QuickAccessShortcut) {
+    localStorage.setItem(quickAccessShortcutStorageKey, JSON.stringify(shortcut));
+    return shortcut;
+  },
 };
 
 const tauriApi: Api = {
@@ -249,6 +279,8 @@ const tauriApi: Api = {
   setFavorite: (id, favorite) => invoke<VaultItem>('set_item_favorite', { id, favorite }),
   generatePassword: (options) => invoke<string>('generate_password', { options }),
   copyText: (value) => invoke<void>('copy_text', { value }),
+  getQuickAccessShortcut: () => invoke<QuickAccessShortcut>('get_quick_access_shortcut'),
+  setQuickAccessShortcut: (shortcut) => invoke<QuickAccessShortcut>('set_quick_access_shortcut', { shortcut }),
 };
 
 export const api: Api = isTauriRuntime() ? tauriApi : browserPreviewApi;
