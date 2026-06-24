@@ -29,14 +29,17 @@ jobs:
             platform: macos-latest
             rust-target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles dmg
+            asset-suffix: macOS-AppleSilicon
           - name: macOS Intel
             platform: macos-latest
             rust-target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin --bundles dmg
+            asset-suffix: macOS-Intel
           - name: Windows x64
             platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: --bundles nsis
+            asset-suffix: Windows-x64-Setup
 
     steps:
       - name: Checkout
@@ -76,4 +79,5 @@ jobs:
             Unsigned preview build. macOS may show a security warning until code signing and notarization are configured.
           releaseDraft: false
           prerelease: false
+          assetNamePattern: CaptainPassword-v[version]-${{ matrix.asset-suffix }}[ext]
           args: ${{ matrix.args }}

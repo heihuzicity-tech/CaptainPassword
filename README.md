@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/heihuzicity-tech/CaptainPassword/releases"><img src="https://img.shields.io/github/v/release/heihuzicity-tech/CaptainPassword?include_prereleases&label=release" alt="Release"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-0A84FF" alt="Platforms">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-0A84FF" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Tauri%20%2B%20React-24C8DB" alt="Built with Tauri and React">
 </p>
 
@@ -51,11 +51,11 @@
 
 ## 界面预览
 
-### 解锁与主界面
+### 首次创建与主界面
 
-#### 本地保险库解锁
+#### 创建本地保险库
 
-![本地保险库解锁](docs/screenshots/unlock.png)
+![创建本地保险库](docs/screenshots/setup.png)
 
 #### 登录信息详情
 
@@ -63,7 +63,7 @@
 
 ### 编辑与创建
 
-#### 编辑模式
+#### 编辑登录信息
 
 ![编辑登录信息](docs/screenshots/edit-item.png)
 
@@ -106,7 +106,7 @@
 - npm package / Rust crate：`captain-password`
 - Bundle identifier：`ai.heihuzi.captainpassword`
 
-Tauri 的 `productName` 保持 ASCII，是为了让 GitHub Release 产物在 macOS、Windows、Linux 上拥有稳定的文件名；用户看到的窗口标题仍然是 `船长密码箱`。
+Tauri 的 `productName` 保持 ASCII，是为了让 GitHub Release 产物在 macOS、Windows 上拥有稳定的文件名；用户看到的窗口标题仍然是 `船长密码箱`。
 
 ## 安全说明
 
