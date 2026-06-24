@@ -8,13 +8,15 @@ import type {
   PasswordInput,
   PasswordItem,
   QuickAccessShortcut,
+  VaultProfile,
   VaultItem,
   VaultStatus,
 } from './types';
 
 type Api = {
   getStatus(): Promise<VaultStatus>;
-  initializeVault(masterPassword: string): Promise<VaultStatus>;
+  getVaultProfile(): Promise<VaultProfile>;
+  initializeVault(profileName: string, masterPassword: string): Promise<VaultStatus>;
   unlock(masterPassword: string): Promise<VaultStatus>;
   lock(): Promise<VaultStatus>;
   listItems(): Promise<ItemOverview[]>;
@@ -29,64 +31,25 @@ type Api = {
   setQuickAccessShortcut(shortcut: QuickAccessShortcut): Promise<QuickAccessShortcut>;
 };
 
-const demoItems: VaultItem[] = [
-  {
-    id: 'demo-mintlify',
-    item_type: 'login',
-    title: 'Mintlify',
-    username: 'captain@example.com',
-    password: 'DemoPassword-123',
-    website: 'https://example.com',
-    websites: ['https://example.com'],
-    website_labels: ['网站'],
-    notes: '演示条目，仅用于浏览器预览。',
-    tags: [],
-    favorite: true,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 'demo-fastreal',
-    item_type: 'login',
-    title: 'FastReal',
-    username: 'demo@example.com',
-    password: 'DemoPassword-456',
-    website: 'https://example.com',
-    websites: ['https://example.com'],
-    website_labels: ['网站'],
-    notes: '',
-    tags: [],
-    favorite: false,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 'demo-openai',
-    item_type: 'login',
-    title: 'OpenAI',
-    username: 'demo@example.com',
-    password: 'DemoPassword-789',
-    website: 'https://example.com',
-    websites: ['https://example.com'],
-    website_labels: ['网站'],
-    notes: '',
-    tags: [],
-    favorite: false,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: 'demo-wifi-password',
-    item_type: 'password',
-    title: 'WiFi 密码',
-    password: 'DemoPassword-WiFi',
-    notes: '本地演示用的独立密码项目。',
-    tags: [],
-    favorite: false,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-];
+const demoItems: VaultItem[] = [];
+const browserVaultProfileStorageKey = 'captain.browserVaultProfile';
+
+const fallbackVaultProfile: VaultProfile = { name: '本地保险库', avatar: '本' };
+
+const avatarForName = (name: string) => name.trim().slice(0, 1) || fallbackVaultProfile.avatar;
+
+const readBrowserVaultProfile = () => {
+  try {
+    const saved = localStorage.getItem(browserVaultProfileStorageKey);
+    if (!saved) return fallbackVaultProfile;
+    const parsed = JSON.parse(saved) as Partial<VaultProfile>;
+    if (!parsed.name?.trim()) return fallbackVaultProfile;
+    const name = parsed.name.trim();
+    return { name, avatar: parsed.avatar?.trim() || avatarForName(name) };
+  } catch {
+    return fallbackVaultProfile;
+  }
+};
 
 const toOverview = (item: VaultItem): ItemOverview => ({
   id: item.id,
@@ -134,13 +97,18 @@ const readBrowserQuickAccessShortcut = () => {
 
 const browserPreviewApi: Api = {
   async getStatus() {
-    return 'unlocked';
+    return localStorage.getItem(browserVaultProfileStorageKey) ? 'unlocked' : 'no_vault';
   },
-  async initializeVault() {
+  async getVaultProfile() {
+    return readBrowserVaultProfile();
+  },
+  async initializeVault(profileName: string) {
+    const name = profileName.trim() || fallbackVaultProfile.name;
+    localStorage.setItem(browserVaultProfileStorageKey, JSON.stringify({ name, avatar: avatarForName(name) }));
     return 'unlocked';
   },
   async unlock() {
-    return 'unlocked';
+    return localStorage.getItem(browserVaultProfileStorageKey) ? 'unlocked' : 'no_vault';
   },
   async lock() {
     return 'locked';
@@ -268,7 +236,8 @@ const browserPreviewApi: Api = {
 
 const tauriApi: Api = {
   getStatus: () => invoke<VaultStatus>('get_status'),
-  initializeVault: (masterPassword) => invoke<VaultStatus>('initialize_vault', { masterPassword }),
+  getVaultProfile: () => invoke<VaultProfile>('get_vault_profile'),
+  initializeVault: (profileName, masterPassword) => invoke<VaultStatus>('initialize_vault', { profileName, masterPassword }),
   unlock: (masterPassword) => invoke<VaultStatus>('unlock_vault', { masterPassword }),
   lock: () => invoke<VaultStatus>('lock_vault'),
   listItems: () => invoke<ItemOverview[]>('list_items'),

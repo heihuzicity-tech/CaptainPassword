@@ -84,6 +84,7 @@ import type {
   LoginInput,
   PasswordInput,
   QuickAccessShortcut,
+  VaultProfile,
   VaultItem,
   VaultStatus,
 } from './types';
@@ -116,6 +117,9 @@ type ShortcutKeyEvent = Pick<
 
 const APP_NAME = '船长密码箱';
 const QUICK_WINDOW_LABEL = 'quick-search';
+const LOCAL_VAULT_NAME = '本地保险库';
+const LOCAL_VAULT_AVATAR = '本';
+const DEFAULT_VAULT_PROFILE: VaultProfile = { name: LOCAL_VAULT_NAME, avatar: LOCAL_VAULT_AVATAR };
 const quickWindowWidth = 380;
 const sidebarWidthLimits = { min: 230, max: 420, default: 276 };
 const itemListWidthLimits = { min: 300, max: 520, default: 354 };
@@ -307,6 +311,7 @@ export function App() {
 
 function MainApp() {
   const [status, setStatus] = useState<VaultStatus>('locked');
+  const [vaultProfile, setVaultProfile] = useState<VaultProfile>(DEFAULT_VAULT_PROFILE);
   const [items, setItems] = useState<ItemOverview[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [selectedItem, setSelectedItem] = useState<VaultItem>();
@@ -335,15 +340,20 @@ function MainApp() {
     setSelectedId((current) => current ?? nextItems[0]?.id);
   }, []);
 
+  const refreshVaultProfile = useCallback(async () => {
+    setVaultProfile(await api.getVaultProfile());
+  }, []);
+
   useEffect(() => {
     api
       .getStatus()
       .then(async (nextStatus) => {
         setStatus(nextStatus);
+        if (nextStatus !== 'no_vault') await refreshVaultProfile();
         if (nextStatus === 'unlocked') await refreshItems();
       })
       .catch((err) => setError(String(err)));
-  }, [refreshItems]);
+  }, [refreshItems, refreshVaultProfile]);
 
   useEffect(() => {
     if (status !== 'unlocked' || !selectedId) {
@@ -377,7 +387,10 @@ function MainApp() {
   const handleUnlocked = async (nextStatus: VaultStatus) => {
     setStatus(nextStatus);
     setError('');
-    if (nextStatus === 'unlocked') await refreshItems();
+    if (nextStatus === 'unlocked') {
+      await refreshVaultProfile();
+      await refreshItems();
+    }
   };
 
   const handleFavoriteChange = async (id: string, favorite: boolean) => {
@@ -463,6 +476,7 @@ function MainApp() {
       {!sidebarCollapsed && (
         <>
           <Sidebar
+            vaultProfile={vaultProfile}
             selectedView={sidebarView}
             onViewChange={setSidebarView}
             onToggleSidebar={() => setSidebarCollapsed(true)}
@@ -480,6 +494,7 @@ function MainApp() {
       )}
       <main className="main-area">
         <TopToolbar
+          vaultProfile={vaultProfile}
           query={query}
           sidebarCollapsed={sidebarCollapsed}
           onQueryChange={setQuery}
@@ -504,7 +519,12 @@ function MainApp() {
             onPointerDown={(event) => beginPaneResize('itemList', event)}
             onKeyDown={(event) => handlePaneResizeKey('itemList', event)}
           />
-          <DetailPane item={selectedItem} onFavoriteChange={handleFavoriteChange} onItemUpdate={handleItemUpdate} />
+          <DetailPane
+            item={selectedItem}
+            vaultProfile={vaultProfile}
+            onFavoriteChange={handleFavoriteChange}
+            onItemUpdate={handleItemUpdate}
+          />
         </section>
       </main>
 
@@ -550,11 +570,21 @@ function SetupScreen({
   onError: (value: string) => void;
   onReady: (status: VaultStatus) => void;
 }) {
+  const [profileName, setProfileName] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
+    const trimmedProfileName = profileName.trim();
+    if (!trimmedProfileName) {
+      onError('请输入用户名。');
+      return;
+    }
+    if (trimmedProfileName.length > 40) {
+      onError('用户名不能超过 40 个字符。');
+      return;
+    }
     if (password.length < 8) {
       onError('主密码至少需要 8 个字符。');
       return;
@@ -565,7 +595,7 @@ function SetupScreen({
     }
     setBusy(true);
     try {
-      onReady(await api.initializeVault(password));
+      onReady(await api.initializeVault(trimmedProfileName, password));
     } catch (err) {
       onError(String(err));
     } finally {
@@ -576,12 +606,14 @@ function SetupScreen({
   return (
     <AuthScreen
       title={`创建${APP_NAME}`}
-      description="主密码只在本机用于解锁加密数据，不会写入数据库。"
+      description="用户名只用于本机显示；主密码用于解锁本地加密数据。"
       error={error}
+      profileName={profileName}
       password={password}
       confirmPassword={confirmPassword}
       busy={busy}
       submitLabel="创建并解锁"
+      onProfileNameChange={setProfileName}
       onPasswordChange={setPassword}
       onConfirmPasswordChange={setConfirmPassword}
       onSubmit={submit}
@@ -632,8 +664,10 @@ function AuthScreen({
   error,
   password,
   confirmPassword,
+  profileName,
   busy,
   submitLabel,
+  onProfileNameChange,
   onPasswordChange,
   onConfirmPasswordChange,
   onSubmit,
@@ -641,10 +675,12 @@ function AuthScreen({
   title: string;
   description: string;
   error: string;
+  profileName?: string;
   password: string;
   confirmPassword?: string;
   busy: boolean;
   submitLabel: string;
+  onProfileNameChange?: (value: string) => void;
   onPasswordChange: (value: string) => void;
   onConfirmPasswordChange?: (value: string) => void;
   onSubmit: () => void;
@@ -657,10 +693,23 @@ function AuthScreen({
         </div>
         <h1>{title}</h1>
         <p>{description}</p>
+        {onProfileNameChange && (
+          <label className="auth-field">
+            <span>用户名</span>
+            <input
+              autoFocus
+              type="text"
+              value={profileName}
+              placeholder="例如：船长"
+              onChange={(event) => onProfileNameChange(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && onSubmit()}
+            />
+          </label>
+        )}
         <label className="auth-field">
           <span>主密码</span>
           <input
-            autoFocus
+            autoFocus={!onProfileNameChange}
             type="password"
             value={password}
             onChange={(event) => onPasswordChange(event.target.value)}
@@ -1056,12 +1105,14 @@ function QuickSearchWindow() {
 }
 
 function Sidebar({
+  vaultProfile,
   selectedView,
   onViewChange,
   onToggleSidebar,
   onOpenSettings,
   onLock,
 }: {
+  vaultProfile: VaultProfile;
   selectedView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   onToggleSidebar: () => void;
@@ -1074,8 +1125,8 @@ function Sidebar({
         <PanelLeftClose size={22} />
       </button>
       <div className="sidebar-account">
-        <div className="avatar">ya</div>
-        <div className="account-name">ya zhang</div>
+        <div className="avatar">{vaultProfile.avatar}</div>
+        <div className="account-name">{vaultProfile.name}</div>
         <ChevronDown size={18} />
       </div>
       <nav className="sidebar-nav">
@@ -1155,6 +1206,7 @@ function SidebarButton({
 }
 
 function TopToolbar({
+  vaultProfile,
   query,
   sidebarCollapsed,
   onQueryChange,
@@ -1162,6 +1214,7 @@ function TopToolbar({
   onOpenQuickSearch,
   onNewItem,
 }: {
+  vaultProfile: VaultProfile;
   query: string;
   sidebarCollapsed: boolean;
   onQueryChange: (value: string) => void;
@@ -1182,7 +1235,7 @@ function TopToolbar({
       )}
       <label className="global-search">
         <Search size={20} />
-        <input value={query} placeholder="在“ya zhang”中搜索" onChange={(event) => onQueryChange(event.target.value)} />
+        <input value={query} placeholder={`在“${vaultProfile.name}”中搜索`} onChange={(event) => onQueryChange(event.target.value)} />
       </label>
       <button className="icon-button quick-tool-trigger" aria-label="打开迷你查询" onClick={onOpenQuickSearch}>
         <Command size={20} />
@@ -1297,10 +1350,12 @@ function ItemIcon({ item }: { item: ItemOverview }) {
 
 function DetailPane({
   item,
+  vaultProfile,
   onFavoriteChange,
   onItemUpdate,
 }: {
   item?: VaultItem;
+  vaultProfile: VaultProfile;
   onFavoriteChange: (id: string, favorite: boolean) => Promise<void>;
   onItemUpdate: (id: string, input: EditableItemInput) => Promise<VaultItem>;
 }) {
@@ -1348,8 +1403,8 @@ function DetailPane({
     <section className="detail-pane">
       <div className="detail-toolbar">
         <div className="detail-scope">
-          <span className="mini-avatar">ya</span>
-          <strong>ya zhang</strong>
+          <span className="mini-avatar">{vaultProfile.avatar}</span>
+          <strong>{vaultProfile.name}</strong>
         </div>
         <div className="detail-actions">
           <button

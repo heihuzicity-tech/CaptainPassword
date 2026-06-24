@@ -102,6 +102,12 @@ struct PasswordDetails {
     updated_at: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct VaultProfile {
+    name: String,
+    avatar: String,
+}
+
 #[derive(Deserialize)]
 struct LoginInput {
     title: String,
@@ -144,37 +150,16 @@ struct ShortcutPreference {
     keys: Vec<String>,
 }
 
+const DEFAULT_VAULT_PROFILE_NAME: &str = "本地保险库";
+
 fn data_dir() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir()
         .ok_or_else(|| "Unable to resolve local data directory".to_string())?;
-    let current = base.join("CaptainPassword");
-    let legacy = base.join("OnePass Local");
-
-    let current_has_data = current.join("captain-password.sqlite").exists()
-        || current.join("preferences.json").exists();
-    let legacy_has_data =
-        legacy.join("onepass.sqlite").exists() || legacy.join("preferences.json").exists();
-
-    if current_has_data || (current.exists() && !legacy_has_data) {
-        return Ok(current);
-    }
-    if legacy_has_data {
-        return Ok(legacy);
-    }
-    Ok(current)
+    Ok(base.join("CaptainPassword"))
 }
 
 fn db_path() -> Result<PathBuf, String> {
-    let dir = data_dir()?;
-    let current = dir.join("captain-password.sqlite");
-    if current.exists() {
-        return Ok(current);
-    }
-    let legacy = dir.join("onepass.sqlite");
-    if legacy.exists() {
-        return Ok(legacy);
-    }
-    Ok(current)
+    Ok(data_dir()?.join("captain-password.sqlite"))
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
@@ -395,6 +380,31 @@ fn title_or_default(title: &str, fallback: &str) -> String {
     }
 }
 
+fn normalize_profile_name(profile_name: &str) -> Result<String, String> {
+    let trimmed = profile_name.trim();
+    if trimmed.is_empty() {
+        return Err("请输入用户名。".to_string());
+    }
+    if trimmed.chars().count() > 40 {
+        return Err("用户名不能超过 40 个字符。".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn profile_avatar(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "本".to_string())
+}
+
+fn profile_from_name(name: String) -> VaultProfile {
+    VaultProfile {
+        avatar: profile_avatar(&name),
+        name,
+    }
+}
+
 fn icon_text(title: &str) -> String {
     title.chars().take(2).collect::<String>()
 }
@@ -464,10 +474,25 @@ fn get_status(state: tauri::State<AppState>) -> Result<VaultStatus, String> {
 }
 
 #[tauri::command]
+fn get_vault_profile() -> Result<VaultProfile, String> {
+    let conn = open_db()?;
+    let name = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params!["vault_profile_name"],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| DEFAULT_VAULT_PROFILE_NAME.to_string());
+    Ok(profile_from_name(name))
+}
+
+#[tauri::command]
 fn initialize_vault(
+    profile_name: String,
     master_password: String,
     state: tauri::State<AppState>,
 ) -> Result<VaultStatus, String> {
+    let profile_name = normalize_profile_name(&profile_name)?;
     if master_password.len() < 8 {
         return Err("Master password must contain at least 8 characters".to_string());
     }
@@ -492,8 +517,13 @@ fn initialize_vault(
     };
 
     conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
         params!["schema_version", "1"],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params!["vault_profile_name", profile_name],
     )
     .map_err(|err| err.to_string())?;
     conn.execute(
@@ -915,6 +945,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_vault_profile,
             initialize_vault,
             unlock_vault,
             lock_vault,

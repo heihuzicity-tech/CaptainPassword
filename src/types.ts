@@ -1,5 +1,10 @@
 export type VaultStatus = 'no_vault' | 'locked' | 'unlocked';
 
+export type VaultProfile = {
+  name: string;
+  avatar: string;
+};
+
 export type ItemType = 'login' | 'secure_note' | 'credit_card' | 'identity' | 'password' | 'document';
 
 export type ItemOverview = {
