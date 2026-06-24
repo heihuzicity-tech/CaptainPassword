@@ -80,3 +80,14 @@ export type QuickAccessShortcut = {
   accelerator: string;
   keys: string[];
 };
+
+export type AppUpdateInfo = {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseName: string;
+  releaseUrl: string;
+  notes: string;
+  publishedAt: string;
+  checkedAt: string;
+};

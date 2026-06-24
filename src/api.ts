@@ -1,5 +1,8 @@
 import { invoke, isTauri as isTauriRuntime } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import packageJson from '../package.json';
 import type {
+  AppUpdateInfo,
   EditableItemInput,
   GeneratedPasswordOptions,
   ItemOverview,
@@ -14,6 +17,9 @@ import type {
 } from './types';
 
 type Api = {
+  getAppVersion(): Promise<string>;
+  checkForUpdate(): Promise<AppUpdateInfo>;
+  openExternalUrl(url: string): Promise<void>;
   getStatus(): Promise<VaultStatus>;
   getVaultProfile(): Promise<VaultProfile>;
   initializeVault(profileName: string, masterPassword: string): Promise<VaultStatus>;
@@ -35,6 +41,86 @@ const demoItems: VaultItem[] = [];
 const browserVaultProfileStorageKey = 'captain.browserVaultProfile';
 
 const fallbackVaultProfile: VaultProfile = { name: '本地保险库', avatar: '本' };
+const appVersion = packageJson.version;
+const githubLatestReleaseApiUrl = 'https://api.github.com/repos/heihuzicity-tech/CaptainPassword/releases/latest';
+const githubLatestReleasePageUrl = 'https://github.com/heihuzicity-tech/CaptainPassword/releases/latest';
+
+type GitHubRelease = {
+  tag_name?: string;
+  name?: string | null;
+  body?: string | null;
+  html_url?: string;
+  published_at?: string | null;
+};
+
+const normalizeVersion = (version: string) => version.trim().replace(/^v/i, '').split(/[+-]/)[0];
+
+const versionSegments = (version: string) =>
+  normalizeVersion(version)
+    .split('.')
+    .map((segment) => {
+      const parsed = Number.parseInt(segment, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    });
+
+const compareVersions = (left: string, right: string) => {
+  const leftSegments = versionSegments(left);
+  const rightSegments = versionSegments(right);
+  const segmentCount = Math.max(leftSegments.length, rightSegments.length);
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const difference = (leftSegments[index] ?? 0) - (rightSegments[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+
+  return 0;
+};
+
+const assertOpenableUrl = (url: string) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('只允许打开 HTTP/HTTPS 链接');
+  }
+  return parsed.toString();
+};
+
+const checkGitHubReleaseForUpdate = async (): Promise<AppUpdateInfo> => {
+  const response = await fetch(githubLatestReleaseApiUrl, {
+    headers: { Accept: 'application/vnd.github+json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub 返回 ${response.status}`);
+  }
+
+  const release = (await response.json()) as GitHubRelease;
+  const tagName = release.tag_name?.trim();
+  if (!tagName) throw new Error('GitHub release 缺少版本标签');
+
+  const latestVersion = normalizeVersion(tagName);
+
+  return {
+    available: compareVersions(latestVersion, appVersion) > 0,
+    currentVersion: appVersion,
+    latestVersion,
+    releaseName: release.name?.trim() || tagName,
+    releaseUrl: release.html_url || githubLatestReleasePageUrl,
+    notes: release.body?.trim() || '',
+    publishedAt: release.published_at || '',
+    checkedAt: new Date().toISOString(),
+  };
+};
+
+const openUrlInBrowser = async (url: string) => {
+  const safeUrl = assertOpenableUrl(url);
+  if (isTauriRuntime()) {
+    await openUrl(safeUrl);
+    return;
+  }
+
+  window.open(safeUrl, '_blank', 'noopener,noreferrer');
+};
 
 const avatarForName = (name: string) => name.trim().slice(0, 1) || fallbackVaultProfile.avatar;
 
@@ -96,6 +182,11 @@ const readBrowserQuickAccessShortcut = () => {
 };
 
 const browserPreviewApi: Api = {
+  async getAppVersion() {
+    return appVersion;
+  },
+  checkForUpdate: checkGitHubReleaseForUpdate,
+  openExternalUrl: openUrlInBrowser,
   async getStatus() {
     return localStorage.getItem(browserVaultProfileStorageKey) ? 'unlocked' : 'no_vault';
   },
@@ -235,6 +326,9 @@ const browserPreviewApi: Api = {
 };
 
 const tauriApi: Api = {
+  getAppVersion: async () => appVersion,
+  checkForUpdate: checkGitHubReleaseForUpdate,
+  openExternalUrl: openUrlInBrowser,
   getStatus: () => invoke<VaultStatus>('get_status'),
   getVaultProfile: () => invoke<VaultProfile>('get_vault_profile'),
   initializeVault: (profileName, masterPassword) => invoke<VaultStatus>('initialize_vault', { profileName, masterPassword }),

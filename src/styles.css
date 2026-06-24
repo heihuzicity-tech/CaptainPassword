@@ -900,6 +900,13 @@ body.is-resizing-pane * {
   gap: 18px;
   min-width: 0;
   padding: 28px;
+  overflow: auto;
+}
+
+.settings-panel-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
 }
 
 .settings-panel-heading h3 {
@@ -927,7 +934,8 @@ body.is-resizing-pane * {
   min-width: 0;
 }
 
-.shortcut-copy strong {
+.shortcut-copy strong,
+.update-copy strong {
   color: var(--text);
   font-size: var(--font-size-body-large);
   font-weight: var(--font-weight-strong);
@@ -987,6 +995,10 @@ body.is-resizing-pane * {
 
 .secondary-button,
 .plain-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   min-height: 30px;
   padding: 0 11px;
   border-radius: 7px;
@@ -1012,6 +1024,67 @@ body.is-resizing-pane * {
   color: var(--muted);
   font-size: var(--font-size-body-small);
   text-align: right;
+}
+
+.update-card {
+  display: grid;
+  grid-template-columns: minmax(250px, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.update-card.has-update {
+  border-color: #9dc4f8;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.update-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.update-copy span {
+  color: var(--muted);
+  font-size: var(--font-size-body-medium);
+  line-height: 1.35;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 260px;
+}
+
+.update-open-button {
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 7px;
+  font-size: var(--font-size-body-small);
+}
+
+.update-message {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: var(--font-size-body-small);
+  line-height: 1.35;
+  text-align: right;
+}
+
+.spin-icon {
+  animation: update-spin 0.8s linear infinite;
+}
+
+@keyframes update-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .shortcut-keys kbd {

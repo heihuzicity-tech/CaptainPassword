@@ -78,6 +78,7 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { api } from './api';
 import type {
+  AppUpdateInfo,
   EditableItemInput,
   ItemOverview,
   ItemType,
@@ -1671,8 +1672,29 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [recording, setRecording] = useState(false);
   const [shortcutMessage, setShortcutMessage] = useState('');
   const [savingShortcut, setSavingShortcut] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [openingRelease, setOpeningRelease] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState('');
   const recorderRef = useRef<HTMLButtonElement>(null);
   const shortcutChanged = draftShortcut.accelerator !== savedShortcut.accelerator;
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getAppVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => {
+        if (!cancelled) setAppVersion('');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1690,6 +1712,45 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       cancelled = true;
     };
   }, []);
+
+  const checkForUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateMessage('');
+    try {
+      const info = await api.checkForUpdate();
+      setUpdateInfo(info);
+      setAppVersion(info.currentVersion);
+      setUpdateMessage(info.available ? `发现新版本 ${info.latestVersion}。` : '已是最新版本。');
+    } catch (err) {
+      setUpdateMessage(`检查失败：${String(err)}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const openReleasePage = async () => {
+    if (!updateInfo) return;
+    setOpeningRelease(true);
+    setUpdateMessage('');
+    try {
+      await api.openExternalUrl(updateInfo.releaseUrl);
+    } catch (err) {
+      setUpdateMessage(`打开失败：${String(err)}`);
+    } finally {
+      setOpeningRelease(false);
+    }
+  };
+
+  const releaseDate = updateInfo?.publishedAt ? new Date(updateInfo.publishedAt) : null;
+  const releaseDateText =
+    releaseDate && !Number.isNaN(releaseDate.getTime())
+      ? releaseDate.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+      : '';
+  const updateSummary = updateInfo
+    ? updateInfo.available
+      ? `GitHub 已发布 ${updateInfo.releaseName}${releaseDateText ? `，发布于 ${releaseDateText}` : ''}。`
+      : `当前版本 ${updateInfo.currentVersion} 已是 GitHub 最新发布版本。`
+    : `当前版本 ${appVersion || '读取中'}。`;
 
   const beginRecording = () => {
     setRecording(true);
@@ -1779,51 +1840,87 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="设置栏目">
             <button className="settings-nav-item selected">
-              <Command size={18} />
-              <span>快捷键</span>
+              <Settings size={18} />
+              <span>通用</span>
             </button>
           </nav>
 
-          <section className="settings-panel" aria-labelledby="shortcut-settings-title">
-            <div className="settings-panel-heading">
-              <h3 id="shortcut-settings-title">快捷键</h3>
-              <p>快速唤醒迷你查询窗口，减少在登录页面和主窗口之间来回切换。</p>
-            </div>
+          <section className="settings-panel" aria-label="通用设置">
+            <section className="settings-panel-section" aria-labelledby="shortcut-settings-title">
+              <div className="settings-panel-heading">
+                <h3 id="shortcut-settings-title">快捷键</h3>
+                <p>快速唤醒迷你查询窗口，减少在登录页面和主窗口之间来回切换。</p>
+              </div>
 
-            <div className="shortcut-list">
-              <div className="shortcut-row">
-                <div className="shortcut-copy">
-                  <strong>打开迷你查询</strong>
-                  <span>在任意应用前台唤醒迷你查询窗口。</span>
-                </div>
-                <div className="shortcut-editor">
-                  <button
-                    ref={recorderRef}
-                    type="button"
-                    className={`shortcut-recorder ${recording ? 'recording' : ''}`}
-                    aria-label="录入打开迷你查询快捷键"
-                    aria-pressed={recording}
-                    onClick={beginRecording}
-                  >
-                    <span className="shortcut-keys" aria-label={`快捷键 ${draftShortcut.keys.join(' ')}`}>
-                      {draftShortcut.keys.map((key) => (
-                        <kbd key={key}>{key}</kbd>
-                      ))}
-                    </span>
-                    <span className="shortcut-recorder-text">{recording ? '按下组合键' : '修改'}</span>
-                  </button>
-                  <div className="shortcut-actions">
-                    <button className="secondary-button" disabled={!shortcutChanged || savingShortcut} onClick={() => void saveShortcut()}>
-                      {savingShortcut ? '保存中' : '保存'}
-                    </button>
-                    <button className="plain-button" disabled={savingShortcut} onClick={() => void resetShortcut()}>
-                      恢复默认
-                    </button>
+              <div className="shortcut-list">
+                <div className="shortcut-row">
+                  <div className="shortcut-copy">
+                    <strong>打开迷你查询</strong>
+                    <span>在任意应用前台唤醒迷你查询窗口。</span>
                   </div>
-                  {shortcutMessage && <span className="shortcut-message">{shortcutMessage}</span>}
+                  <div className="shortcut-editor">
+                    <button
+                      ref={recorderRef}
+                      type="button"
+                      className={`shortcut-recorder ${recording ? 'recording' : ''}`}
+                      aria-label="录入打开迷你查询快捷键"
+                      aria-pressed={recording}
+                      onClick={beginRecording}
+                    >
+                      <span className="shortcut-keys" aria-label={`快捷键 ${draftShortcut.keys.join(' ')}`}>
+                        {draftShortcut.keys.map((key) => (
+                          <kbd key={key}>{key}</kbd>
+                        ))}
+                      </span>
+                      <span className="shortcut-recorder-text">{recording ? '按下组合键' : '修改'}</span>
+                    </button>
+                    <div className="shortcut-actions">
+                      <button className="secondary-button" disabled={!shortcutChanged || savingShortcut} onClick={() => void saveShortcut()}>
+                        {savingShortcut ? '保存中' : '保存'}
+                      </button>
+                      <button className="plain-button" disabled={savingShortcut} onClick={() => void resetShortcut()}>
+                        恢复默认
+                      </button>
+                    </div>
+                    {shortcutMessage && <span className="shortcut-message">{shortcutMessage}</span>}
+                  </div>
                 </div>
               </div>
-            </div>
+            </section>
+
+            <section className="settings-panel-section" aria-labelledby="update-settings-title">
+              <div className="settings-panel-heading">
+                <h3 id="update-settings-title">版本与更新</h3>
+                <p>{updateSummary}</p>
+              </div>
+
+              <div className={`update-card ${updateInfo?.available ? 'has-update' : ''}`}>
+                <div className="update-copy">
+                  <strong>{updateInfo?.available ? `新版本 ${updateInfo.latestVersion}` : 'GitHub 发布版本'}</strong>
+                  <span>
+                    {updateInfo
+                      ? updateInfo.available
+                        ? '可以前往 GitHub 下载最新安装包。'
+                        : '没有发现可用更新。'
+                      : '从 GitHub Releases 获取最新版本。'}
+                  </span>
+                </div>
+
+                <div className="update-actions">
+                  <button className="secondary-button" disabled={checkingUpdate || openingRelease} onClick={() => void checkForUpdate()}>
+                    <RefreshCw size={14} className={checkingUpdate ? 'spin-icon' : ''} />
+                    <span>{checkingUpdate ? '检查中' : '检查更新'}</span>
+                  </button>
+                  {updateInfo?.available && (
+                    <button className="primary-button update-open-button" disabled={openingRelease} onClick={() => void openReleasePage()}>
+                      <Share size={14} />
+                      <span>{openingRelease ? '打开中' : '前往 GitHub'}</span>
+                    </button>
+                  )}
+                  {updateMessage && <span className="update-message">{updateMessage}</span>}
+                </div>
+              </div>
+            </section>
           </section>
         </div>
       </div>

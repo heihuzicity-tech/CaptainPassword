@@ -932,6 +932,7 @@ fn set_quick_access_shortcut<R: tauri::Runtime>(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .setup(|app| {
             app.handle()
