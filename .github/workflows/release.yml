@@ -37,22 +37,12 @@ jobs:
             platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: --bundles nsis
-          - name: Linux x64
-            platform: ubuntu-22.04
-            rust-target: x86_64-unknown-linux-gnu
-            args: --bundles appimage,deb
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -81,11 +71,9 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 船长密码箱 ${{ env.RELEASE_TAG }}
           releaseBody: |
-            CaptainPassword multi-platform desktop builds.
+            CaptainPassword desktop builds for Windows x64, macOS Apple Silicon, and macOS Intel.
 
-            The release is generated as a draft so artifacts can be checked before publishing.
-          releaseDraft: true
+            Unsigned preview build. macOS may show a security warning until code signing and notarization are configured.
+          releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
           args: ${{ matrix.args }}
